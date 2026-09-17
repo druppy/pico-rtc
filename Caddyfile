@@ -1,0 +1,4 @@
+# Caddyfile — replace with your domain
+yourdomain.com {
+    reverse_proxy app:3000
+}
