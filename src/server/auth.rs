@@ -49,3 +49,54 @@ pub fn check_password(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_room_requires_claim() {
+        assert_eq!(
+            check_password(&None, None, None, true),
+            AuthResult::NeedPassword
+        );
+        assert_eq!(
+            check_password(&None, None, Some("pw"), true),
+            AuthResult::Granted
+        );
+        // Empty claim password does not grant
+        assert_eq!(
+            check_password(&None, None, Some(""), true),
+            AuthResult::NeedPassword
+        );
+    }
+
+    #[test]
+    fn existing_room_verifies_password() {
+        assert_eq!(
+            check_password(&Some("pw".into()), Some("pw"), None, false),
+            AuthResult::Granted
+        );
+        assert_eq!(
+            check_password(&Some("pw".into()), Some("nope"), None, false),
+            AuthResult::PasswordRequired
+        );
+        assert_eq!(
+            check_password(&Some("pw".into()), None, None, false),
+            AuthResult::PasswordRequired
+        );
+        // Claim alone never grants on an existing room
+        assert_eq!(
+            check_password(&Some("pw".into()), None, Some("other"), false),
+            AuthResult::PasswordRequired
+        );
+    }
+
+    #[test]
+    fn passwordless_existing_room_is_open() {
+        assert_eq!(
+            check_password(&None, None, None, false),
+            AuthResult::Granted
+        );
+    }
+}

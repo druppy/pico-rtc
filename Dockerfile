@@ -1,5 +1,6 @@
 # Build stage
-FROM rust:1.85-slim AS builder
+# rust-toolchain.toml pins `channel = "stable"` — keep this tag in sync with it.
+FROM rust:1.90-slim AS builder
 RUN rustup target add wasm32-unknown-unknown
 RUN cargo install trunk
 

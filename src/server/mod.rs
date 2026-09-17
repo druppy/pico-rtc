@@ -7,20 +7,35 @@ use axum::{
     Router,
     extract::{Path, Query, State, Json},
     http::StatusCode,
-    response::{IntoResponse, Sse, sse::Event},
+    response::{Sse, sse::Event, sse::KeepAlive},
     routing::{get, post},
 };
 use dashmap::DashMap;
-use std::convert::Infallible;
+use dashmap::mapref::entry::Entry;
+use futures::{Stream, StreamExt};
+use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::mpsc;
-use tokio_stream::wrappers::UnboundedReceiverStream;
+use tokio::sync::broadcast;
+use tokio_stream::wrappers::BroadcastStream;
 
 use crate::types::{
-    ChatSendRequest, JoinRequest, JoinResponse, SignalMessage, SseEvent, TurnCredentials,
+    ChatSendRequest, JoinRequest, JoinResponse, PeerInfo, SignalMessage, SseEvent, TurnCredentials,
 };
 use self::chat::{ChatMessage, ChatStore};
 use self::rooms::RoomState;
+
+/// Error that terminates an SSE stream (client fell behind). The connection is
+/// closed; the browser's EventSource auto-reconnects and re-subscribes.
+#[derive(Debug)]
+struct SseStreamError;
+
+impl std::fmt::Display for SseStreamError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SSE stream ended (client fell behind)")
+    }
+}
+
+impl std::error::Error for SseStreamError {}
 
 /// Shared application state
 pub struct AppState {
@@ -49,29 +64,27 @@ async fn handle_join(
     State(state): State<Arc<AppState>>,
     Path(room_id): Path<String>,
     Json(req): Json<JoinRequest>,
-) -> Json<JoinResponse> {
+) -> Result<Json<JoinResponse>, StatusCode> {
     if !is_valid_room_name(&room_id) {
-        return Json(JoinResponse::Full {});
+        return Err(StatusCode::BAD_REQUEST);
     }
     if let Some(ref pw) = req.claim_password {
         if pw.len() > 128 {
-            return Json(JoinResponse::Full {});
+            return Err(StatusCode::BAD_REQUEST);
         }
     }
 
-    let is_new = !state.rooms.contains_key(&room_id);
-
-    if is_new {
-        match req.claim_password {
-            Some(ref pw) if !pw.is_empty() => {
-                state.rooms.insert(room_id.clone(), RoomState::new(Some(pw.clone())));
-            }
-            _ => return Json(JoinResponse::NeedPassword {}),
-        }
-    }
-
-    let Some(mut room) = state.rooms.get_mut(&room_id) else {
-        return Json(JoinResponse::NeedPassword {});
+    // Atomically claim-or-load the room (no TOCTOU between existence check and insert).
+    // `is_new` is true only when *this* call created the room with the claim password.
+    let (room, is_new) = match state.rooms.entry(room_id.clone()) {
+        Entry::Occupied(o) => (o.into_ref(), false),
+        Entry::Vacant(v) => match req.claim_password.as_ref() {
+            Some(pw) if !pw.is_empty() => (
+                v.insert(RoomState::new(Some(pw.clone()))),
+                true,
+            ),
+            _ => return Ok(Json(JoinResponse::NeedPassword {})),
+        },
     };
 
     // Auth check
@@ -82,44 +95,50 @@ async fn handle_join(
         is_new,
     ) {
         auth::AuthResult::Granted => {}
-        auth::AuthResult::NeedPassword => return Json(JoinResponse::NeedPassword {}),
-        auth::AuthResult::PasswordRequired => return Json(JoinResponse::PasswordRequired {}),
+        auth::AuthResult::NeedPassword => return Ok(Json(JoinResponse::NeedPassword {})),
+        auth::AuthResult::PasswordRequired => return Ok(Json(JoinResponse::PasswordRequired {})),
     }
 
-    // Capacity
-    if room.participants.len() >= state.max_participants {
-        return Json(JoinResponse::Full {});
-    }
-
+    // Capacity — re-joining with an existing session does not count against the cap
     let self_id = req.session_id.clone();
+    if room.participants.len() >= state.max_participants
+        && !room.participants.contains_key(&self_id)
+    {
+        return Ok(Json(JoinResponse::Full {}));
+    }
+
     let peers: Vec<String> = room.participants.iter().map(|e| e.key().clone()).collect();
 
-    // Store display name for this participant
-    if let Some(ref name) = req.display_name {
-        let name = name.chars().take(64).collect::<String>();
-        room.display_names.insert(self_id.clone(), name);
+    // Store display name for this participant (truncated once, used for storage and the join event)
+    let peer_name: Option<String> = req
+        .display_name
+        .as_ref()
+        .map(|n| n.chars().take(64).collect());
+    if let Some(ref name) = peer_name {
+        room.display_names.insert(self_id.clone(), name.clone());
     }
 
     // Notify existing peers about the new joiner
-    let event = SseEvent::PeerJoined {
-        peer_id: self_id.clone(),
-        peer_name: req.display_name.clone(),
-    };
-    room.broadcast(&event, None);
+    room.broadcast(
+        &SseEvent::PeerJoined {
+            peer_id: self_id.clone(),
+            peer_name,
+        },
+        None,
+    );
 
-    // Create SSE channel: tx goes to room, rx parked for SSE endpoint
-    let (tx, rx) = mpsc::unbounded_channel::<Result<Event, Infallible>>();
+    // Per-participant event channel; the participant's SSE endpoint subscribes to it
+    let (tx, _rx) = broadcast::channel(rooms::SSE_BUFFER_SIZE);
     room.participants.insert(self_id.clone(), tx);
-    room.pending_receivers.push(rx);
 
     // Include chat history in response
     let chat_history = state.chat.history(&room_id, 50);
 
-    Json(JoinResponse::Ok {
+    Ok(Json(JoinResponse::Ok {
         self_id,
         peers,
         chat: chat_history,
-    })
+    }))
 }
 
 // ─── SSE Handler ─────────────────────────────────────────────────────────────
@@ -127,24 +146,52 @@ async fn handle_join(
 async fn handle_sse(
     State(state): State<Arc<AppState>>,
     Path(room_id): Path<String>,
-    Query(_params): Query<std::collections::HashMap<String, String>>,
-) -> impl IntoResponse {
-    let rx = {
-        match state.rooms.get_mut(&room_id) {
-            Some(mut room) => room.pending_receivers.pop(),
-            None => None,
-        }
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Sse<impl Stream<Item = Result<Event, SseStreamError>> + Send>, StatusCode> {
+    // Only active participants may subscribe. The session_id was issued to the
+    // client by the join flow, so this is what makes the room password meaningful.
+    let session_id = params
+        .get("session_id")
+        .filter(|s| !s.is_empty())
+        .ok_or(StatusCode::BAD_REQUEST)?;
+    let (tx, resync) = {
+        let room = state.rooms.get(&room_id).ok_or(StatusCode::NOT_FOUND)?;
+        let tx = room
+            .participants
+            .get(session_id)
+            .map(|e| e.clone())
+            .ok_or(StatusCode::FORBIDDEN)?;
+
+        // Snapshot of current room state. Sent before the live stream so the
+        // client heals any gap (join → SSE connect, or a reconnect). The
+        // subscribe() below happens after the snapshot, so events sent in
+        // between are delivered live without duplication.
+        let peers: Vec<PeerInfo> = room
+            .participants
+            .iter()
+            .filter(|e| e.key() != session_id)
+            .map(|e| PeerInfo {
+                peer_id: e.key().clone(),
+                peer_name: room
+                    .display_names
+                    .get(e.key())
+                    .map(|n| n.value().clone()),
+            })
+            .collect();
+        let chat = state.chat.history(&room_id, 50);
+        (tx, SseEvent::Resync { peers, chat })
     };
 
-    let stream = match rx {
-        Some(rx) => UnboundedReceiverStream::new(rx),
-        None => {
-            let (_tx, rx) = mpsc::unbounded_channel::<Result<Event, Infallible>>();
-            UnboundedReceiverStream::new(rx)
-        }
-    };
+    let resync_event = Event::default().data(serde_json::to_string(&resync).unwrap_or_default());
+    let live = BroadcastStream::new(tx.subscribe()).map(|item| match item {
+        Ok(data) => Ok(Event::default().data(data)),
+        // Lagged: client fell behind. End the stream — the browser's EventSource
+        // auto-reconnects and re-subscribes (getting a fresh resync).
+        Err(_) => Err(SseStreamError),
+    });
+    let stream = futures::stream::iter(vec![Ok(resync_event)]).chain(live);
 
-    Sse::new(stream).keep_alive(axum::response::sse::KeepAlive::new())
+    Ok(Sse::new(stream).keep_alive(KeepAlive::new()))
 }
 
 // ─── Signal Relay ────────────────────────────────────────────────────────────
@@ -152,14 +199,19 @@ async fn handle_sse(
 async fn handle_signal(
     State(state): State<Arc<AppState>>,
     Path(room_id): Path<String>,
-    Query(params): Query<std::collections::HashMap<String, String>>,
+    Query(params): Query<HashMap<String, String>>,
     Json(signal): Json<SignalMessage>,
-) -> StatusCode {
-    let from = params.get("session_id").cloned().unwrap_or_default();
+) -> Result<StatusCode, StatusCode> {
+    let from = params
+        .get("session_id")
+        .cloned()
+        .filter(|s| !s.is_empty())
+        .ok_or(StatusCode::BAD_REQUEST)?;
 
-    let Some(room) = state.rooms.get(&room_id) else {
-        return StatusCode::NOT_FOUND;
-    };
+    let room = state.rooms.get(&room_id).ok_or(StatusCode::NOT_FOUND)?;
+    if !room.is_participant(&from) {
+        return Err(StatusCode::FORBIDDEN);
+    }
 
     let event = match signal {
         SignalMessage::Offer { sdp } => SseEvent::Offer {
@@ -180,11 +232,11 @@ async fn handle_signal(
             sdp_mid,
             sdp_mline_index,
         },
-        SignalMessage::Renegotiate => return StatusCode::NOT_IMPLEMENTED,
+        SignalMessage::Renegotiate => return Err(StatusCode::NOT_IMPLEMENTED),
     };
 
     room.broadcast(&event, Some(&from));
-    StatusCode::OK
+    Ok(StatusCode::OK)
 }
 
 // ─── Chat ────────────────────────────────────────────────────────────────────
@@ -192,18 +244,23 @@ async fn handle_signal(
 async fn handle_chat_send(
     State(state): State<Arc<AppState>>,
     Path(room_id): Path<String>,
-    Query(params): Query<std::collections::HashMap<String, String>>,
+    Query(params): Query<HashMap<String, String>>,
     Json(body): Json<ChatSendRequest>,
-) -> StatusCode {
-    let sender_id = params.get("session_id").cloned().unwrap_or_default();
+) -> Result<StatusCode, StatusCode> {
+    let sender_id = params
+        .get("session_id")
+        .cloned()
+        .filter(|s| !s.is_empty())
+        .ok_or(StatusCode::BAD_REQUEST)?;
 
-    let Some(room) = state.rooms.get(&room_id) else {
-        return StatusCode::NOT_FOUND;
-    };
+    let room = state.rooms.get(&room_id).ok_or(StatusCode::NOT_FOUND)?;
+    if !room.is_participant(&sender_id) {
+        return Err(StatusCode::FORBIDDEN);
+    }
 
     let text: String = body.text.chars().take(2000).collect();
     if text.is_empty() {
-        return StatusCode::BAD_REQUEST;
+        return Err(StatusCode::BAD_REQUEST);
     }
 
     let msg = ChatMessage {
@@ -229,7 +286,7 @@ async fn handle_chat_send(
     };
     room.broadcast(&event, None);
 
-    StatusCode::OK
+    Ok(StatusCode::OK)
 }
 
 // ─── TURN Credentials ────────────────────────────────────────────────────────
@@ -237,8 +294,17 @@ async fn handle_chat_send(
 async fn handle_chat_history(
     State(state): State<Arc<AppState>>,
     Path(room_id): Path<String>,
-) -> Json<Vec<ChatMessage>> {
-    Json(state.chat.history(&room_id, 100))
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Json<Vec<ChatMessage>>, StatusCode> {
+    let session_id = params
+        .get("session_id")
+        .filter(|s| !s.is_empty())
+        .ok_or(StatusCode::BAD_REQUEST)?;
+    let room = state.rooms.get(&room_id).ok_or(StatusCode::NOT_FOUND)?;
+    if !room.is_participant(session_id) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    Ok(Json(state.chat.history(&room_id, 100)))
 }
 
 async fn handle_turn(State(state): State<Arc<AppState>>) -> Json<TurnCredentials> {
@@ -260,4 +326,21 @@ fn is_valid_room_name(name: &str) -> bool {
         && name
             .chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn room_name_validation() {
+        assert!(is_valid_room_name("abc"));
+        assert!(is_valid_room_name("weekly-sync-42"));
+        assert!(!is_valid_room_name(""));
+        assert!(!is_valid_room_name("ab"));
+        assert!(!is_valid_room_name(&"a".repeat(49)));
+        assert!(!is_valid_room_name("UPPER"));
+        assert!(!is_valid_room_name("has_underscore"));
+        assert!(!is_valid_room_name("has space"));
+    }
 }

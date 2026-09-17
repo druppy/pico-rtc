@@ -5,7 +5,8 @@ services:
       - "3000:3000"
     environment:
       - TURN_HOST=turn.yourdomain.com
-      - TURN_SECRET=change-me-to-random-hex
+      # Must match `static-auth-secret` in turnserver.conf. Change both for production.
+      - TURN_SECRET=dev-secret-change-me
       - TURN_PORT=3478
     restart: unless-stopped
 

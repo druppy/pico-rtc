@@ -11,8 +11,13 @@ async fn main() {
         )
         .init();
 
-    let turn_secret =
-        std::env::var("TURN_SECRET").unwrap_or_else(|_| "dev-secret-change-me".into());
+    let turn_secret = match std::env::var("TURN_SECRET") {
+        Ok(v) => v,
+        Err(_) => {
+            tracing::warn!("TURN_SECRET not set — using insecure dev default; set it for production");
+            "dev-secret-change-me".into()
+        }
+    };
     let turn_host = std::env::var("TURN_HOST").unwrap_or_else(|_| "localhost".into());
     let turn_port: u16 = std::env::var("TURN_PORT")
         .unwrap_or_else(|_| "3478".into())

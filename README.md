@@ -72,7 +72,7 @@ cargo build --release --bin server --features ssr
 3. Run coturn on the same host (or a nearby one) to minimize relay latency
 4. Set environment variables:
    - `TURN_HOST` — public hostname of TURN server
-   - `TURN_SECRET` — shared secret for ephemeral HMAC credentials
+   - `TURN_SECRET` — shared secret for ephemeral HMAC credentials (must match `static-auth-secret` in `turnserver.conf`)
    - `TURN_PORT` — usually `3478`
 5. Open UDP ports `3478` (TURN/STUN) and `49152-65535` (relay range) on firewall
 
@@ -83,10 +83,11 @@ services:
   app:
     build: .
     ports:
-      - "8080:8080"
+      - "3000:3000"
     environment:
       - TURN_HOST=turn.example.com
-      - TURN_SECRET=change-me-to-random-hex
+      # Must match `static-auth-secret` in turnserver.conf. Change both for production.
+      - TURN_SECRET=dev-secret-change-me
       - TURN_PORT=3478
     restart: unless-stopped
 
@@ -115,9 +116,12 @@ volumes:
 
 ```
 yourdomain.com {
-    reverse_proxy localhost:8080
+    reverse_proxy app:3000
 }
 ```
+
+(Inside Docker Compose the app service is reachable as `app`; for a bare
+host use `reverse_proxy localhost:3000`.)
 
 ### coturn Config (turnserver.conf)
 
@@ -145,7 +149,6 @@ verbose
 
 ```
 webrtc-app/
-├── .rules                  # Technical constraints & decisions
 ├── README.md               # This file
 ├── Cargo.toml              # Workspace root
 ├── Trunk.toml              # Trunk (client bundler) config
@@ -155,7 +158,7 @@ webrtc-app/
 ├── Dockerfile
 ├── docker-compose.yml
 ├── src/
-│   ├── main.rs             # Entry (server mode)
+│   ├── main.rs             # Entry (wasm32: mounts the CSR app)
 │   ├── app.rs              # Leptos <App>
 │   ├── lib.rs              # Shared types
 │   ├── pages/
@@ -206,7 +209,8 @@ Join (or claim) a room.
 ```
 
 ### `POST /room/:id/signal?session_id=...`
-Relay WebRTC signaling (offer/answer/ICE) to other peers.
+Relay WebRTC signaling (offer/answer/ICE) to other peers. Requires the
+`session_id` of an active participant (otherwise `400`/`403`).
 
 ```json
 {"type": "offer", "sdp": "..."}
@@ -215,9 +219,12 @@ Relay WebRTC signaling (offer/answer/ICE) to other peers.
 ```
 
 ### `GET /room/:id/events?session_id=...`
-SSE stream. Event data (JSON, no `event:` field — parse `data:`):
+SSE stream. **Requires the `session_id` of an active participant** (as issued
+by the join flow) — otherwise `400`/`404`/`403`. Event data (JSON, no
+`event:` field — parse `data:`):
 
 ```json
+{"event": "resync", "peers": [{"peer_id": "...", "peer_name": "Alice"}], "chat": [...]}
 {"event": "peer-joined", "peer_id": "...", "peer_name": "Alice"}
 {"event": "peer-left", "peer_id": "..."}
 {"event": "offer", "from": "...", "sdp": "..."}
@@ -226,15 +233,20 @@ SSE stream. Event data (JSON, no `event:` field — parse `data:`):
 {"event": "chat-message", "from": "...", "sender_name": "...", "text": "...", "timestamp_ms": 123}
 ```
 
+A `resync` event (full room state: peers + last 50 chat messages) is sent on
+every (re)connect, so clients can heal any gap after join or a reconnect.
+
 ### `POST /room/:id/chat?session_id=...`
-Send a chat message (persisted, broadcast via SSE).
+Send a chat message (persisted, broadcast via SSE). Requires the `session_id`
+of an active participant.
 
 ```json
 {"text": "hello", "sender_name": "Alice"}
 ```
 
-### `GET /room/:id/chat/history`
-Last 100 chat messages for the room.
+### `GET /room/:id/chat/history?session_id=...`
+Last 100 chat messages for the room. Requires the `session_id` of an active
+participant.
 
 ### `GET /turn-credentials`
 Ephemeral TURN/STUN credentials (HMAC-SHA1 per TURN REST API spec, 1hr TTL).

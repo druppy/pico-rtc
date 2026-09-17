@@ -1,6 +1,5 @@
 use leptos::prelude::*;
 use leptos_router::hooks::use_navigate;
-use wasm_bindgen::JsCast;
 
 #[component]
 pub fn Home() -> impl IntoView {

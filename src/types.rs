@@ -34,10 +34,24 @@ pub struct ChatSendRequest {
     pub sender_name: Option<String>,
 }
 
+/// A peer as seen in resync/join responses
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PeerInfo {
+    pub peer_id: String,
+    pub peer_name: Option<String>,
+}
+
 /// Events pushed from server → client via SSE
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "kebab-case")]
 pub enum SseEvent {
+    /// Sent on every (re)connect of a participant's SSE stream: full room state
+    /// snapshot so the client heals any gap (join → SSE connect, or reconnect).
+    #[serde(rename = "resync")]
+    Resync {
+        peers: Vec<PeerInfo>,
+        chat: Vec<ChatMessage>,
+    },
     #[serde(rename = "peer-joined")]
     PeerJoined {
         peer_id: String,
