@@ -6,14 +6,18 @@ edition = "2024"
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+# The server binary. Named after the package because cargo-leptos looks up the
+# built executable as target/<profile>/<package-name>, not by bin-target.
 [[bin]]
-name = "server"
+name = "webrtc-room"
 path = "src/bin/server.rs"
 required-features = ["ssr"]
 
 [dependencies]
-# Shared
-leptos = { version = "0.8", features = ["csr"] }
+# Shared. leptos pulls no features of its own here: cargo-leptos selects `csr`
+# for the wasm lib build and `ssr` for the native bin build (see [features]
+# and [package.metadata.leptos] below), so the two never meet in one compile.
+leptos = { version = "0.8" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
@@ -56,8 +60,9 @@ web-sys = { version = "0.3", features = [
     "EventSourceInit",
     "MessageEvent",
     "Storage",
+    "console",
 ] }
-wasm-bindgen = "0.2"
+wasm-bindgen = "=0.2.128"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
 gloo-net = { version = "0.6", features = ["http"] }
@@ -83,7 +88,41 @@ http = "1"
 
 [features]
 default = []
-ssr = []
+# Client side (wasm32 lib build): --no-default-features --features=csr
+csr = ["leptos/csr"]
+# Server side (native bin build): --no-default-features --features=ssr.
+# leptos/ssr implies leptos/hydration, which is what provides AutoReload and
+# HydrationScripts for the HTML shell.
+ssr = ["leptos/ssr"]
+
+# ─── cargo-leptos (single-crate setup) ───────────────────────────────────────
+# One crate holds both halves: the lib target builds to wasm, the `webrtc-room`
+# bin target builds natively. Run `cargo leptos watch` in dev (live reload), or
+# `cargo leptos serve` for a one-shot build-and-run.
+[package.metadata.leptos]
+# Drives the wasm/js/css file names and the /pkg/ URLs in the shell.
+output-name = "webrtc-room"
+bin-target = "webrtc-room"
+
+# All output lands here and is wiped on every rebuild — do not put hand-written
+# files in it. The server writes index.html into it at startup.
+site-root = "target/site"
+site-pkg-dir = "pkg"
+
+# Plain CSS, passed through Lightning CSS for the browserquery target.
+style-file = "style/main.css"
+browserquery = "defaults"
+
+# Dev bind address + live-reload port. cargo-leptos exports these as
+# LEPTOS_SITE_ADDR / LEPTOS_RELOAD_PORT, and the server reads them back.
+site-addr = "127.0.0.1:3000"
+reload-port = 3001
+
+# Per-target feature selection — the trick that keeps this a single crate.
+bin-features = ["ssr"]
+bin-default-features = false
+lib-features = ["csr"]
+lib-default-features = false
 
 [profile.release]
 lto = true

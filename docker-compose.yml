@@ -8,6 +8,11 @@ services:
       # Must match `static-auth-secret` in turnserver.conf. Change both for production.
       - TURN_SECRET=dev-secret-change-me
       - TURN_PORT=3478
+      # Built client location + bind address. The defaults are dev-oriented
+      # (target/site, 127.0.0.1), which a container cannot use.
+      - LEPTOS_SITE_ROOT=/srv/site
+      - LEPTOS_SITE_ADDR=0.0.0.0:3000
+      - LEPTOS_OUTPUT_NAME=webrtc-room
     restart: unless-stopped
 
   coturn:

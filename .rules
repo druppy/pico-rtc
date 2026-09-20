@@ -1,0 +1,80 @@
+# Project Rules — WebRTC Room
+
+## Language & Edition
+- Rust edition 2024 (requires Rust 1.85+)
+- No `unsafe` unless justified with a `// SAFETY:` comment
+- Prefer `thiserror` for error enums, `anyhow` only in `main`/binaries
+
+## Frontend
+- Leptos 0.8+ (CSR mode — WebRTC is inherently client-side)
+- Semantic HTML only (`<main>`, `<section>`, `<header>`, `<figure>`, `<video>`, `<details>`, etc.)
+- CSS: PicoCSS 2.x (no custom framework, utility classes allowed for layout only)
+- Styling: minimal custom CSS in a single file, no CSS-in-JS, no Tailwind
+- Icons: none for MVP (future: inline SVG spritesheet)
+- All user-facing strings: inline for now (future: `rust-i18n` or similar)
+
+## Signaling
+- **SSE (Server-Sent Events)** for server → client push — NOT WebSocket
+- Regular `POST /signal` for client → server (SDP offers/answers, ICE candidates)
+- SSE event types: `peer-joined`, `peer-left`, `offer`, `answer`, `ice-candidate`, `chat-message`
+- All signaling payloads are JSON (serde)
+
+## Chat
+- Chat messages sent via `POST /api/room/:id/chat?session_id=...`
+- Chat history fetched via `GET /api/room/:id/chat/history`
+- Chat broadcast to room members via SSE (`chat-message` event)
+- Storage behind a `ChatStore` trait — currently `InMemoryChat` (per-room ring buffer, 200 msgs max)
+- Future: swap to SQLite/Postgres by implementing `ChatStore` trait
+- Messages are persisted immediately (not fire-and-forget) — append to store BEFORE broadcasting
+
+## User Identity (optional)
+- No accounts required for MVP
+- Optional display name: entered by user, stored in browser cookie `wr_name` (1yr, SameSite=Lax)
+- Stable user ID: auto-generated UUID v4, stored in cookie `wr_uid` (1yr, SameSite=Lax)
+- Both sent in `JoinRequest.display_name` and `JoinRequest.user_id`
+- Server stores display names per-room (in-memory DashMap)
+- Cookie-based identity gives: consistent name across visits, trackable ID for moderation
+- Future: cookie ID becomes the `sub` claim in a JWT when auth is added
+
+## WebRTC
+- `RTCPeerConnection` via `web-sys` (no JS glue files unless absolutely necessary)
+- STUN: always configured (coturn or Google public for dev)
+- TURN: ephemeral HMAC credentials served from `GET /api/turn-credentials`
+- Media: audio + video (camera) by default, screen share as toggle
+- Codec: prefer VP8, fallback to H264 (browser handles negotiation)
+- Data channels: enabled for future collaborative features (drawing, reactions)
+- No server-side media processing (no SFU for MVP — mesh up to ~4 peers)
+
+## Server
+- Framework: Axum 0.8 (paired with Leptos 0.8 fullstack)
+- Async runtime: tokio
+- State: `Arc<DashMap<String, Room>>` — in-memory, no DB
+- SSE: `axum::response::Sse` + `tokio_stream::wrappers::UnboundedReceiverStream`
+- CORS: same-origin only (no cross-origin for MVP)
+- Graceful shutdown: `tokio::signal::ctrl_c` + `axum::serve` with graceful handle
+
+## Build & Deploy
+- Build: `trunk build` for client bundle, `cargo build --release` for server binary
+- Single binary deploys: server binary + static files in `dist/`
+- coturn: separate process (not embedded)
+- Reverse proxy: Caddy or Nginx for TLS (required — WebRTC mandates secure context)
+- Docker: single-stage Dockerfile for server, coturn via `network_mode: host`
+
+## File Naming
+- Snake_case for modules (`room.rs`, `webrtc.rs`)
+- PascalCase for components/types (`RoomPage`, `PeerState`)
+- CSS classes: kebab-case only (`video-tile`, `room-controls`)
+
+## Testing
+- `#[cfg(test)]` for unit tests
+- Integration tests hit real Axum server via `axum::test` helpers
+- WebRTC logic: testable as pure Rust where possible (state machines, signaling message routing)
+
+## Security
+- TURN credentials: ephemeral (HMAC-SHA1 with TTL per TURN REST API spec — this is a protocol constraint, not a weakness; HMAC security is independent of hash collision resistance)
+- Internal hashing (user IDs, future tokens): SHA-256 (sha2 crate)
+- Password comparison: `constant_time_eq` crate (not `==`)
+- SSE connection: authenticated on connect, re-validated on each signal POST
+- No secrets in client bundle (TURN secret stays server-side)
+- Input validation: room name regex `[a-z0-9-]{3,48}`, password max 128 chars, display name max 64 chars, chat message max 2000 chars
+- Cookies: `SameSite=Lax`, `Path=/`, 1-year expiry — no `Secure` in dev (add via reverse proxy)
