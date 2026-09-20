@@ -7,6 +7,7 @@ use crate::components::VideoTile;
 use crate::pages::home::{get_cookie, set_cookie};
 use crate::services::session_id;
 use crate::services::signaling::{RoomStatus, SseStream, join_room, send_chat};
+use crate::services::webrtc::{Mesh, get_local_media};
 use crate::types::{ChatMessage, JoinRequest, JoinResponse, PeerInfo, SseEvent};
 
 /// A chat message as displayed in the UI
@@ -35,6 +36,10 @@ enum Creds {
     /// Unlock an existing room with this password.
     Verify(String),
 }
+
+/// The storage [`StoredValue::new_local`] picks. The mesh holds JS handles, which
+/// are not `Send`, so it cannot go in the default (synchronised) storage.
+type LocalStore<T> = StoredValue<T, leptos::reactive::owner::LocalStorage>;
 
 #[component]
 pub fn RoomPage() -> impl IntoView {
@@ -66,6 +71,12 @@ pub fn RoomPage() -> impl IntoView {
     // Owned by this component and closed in `on_cleanup` below. `StoredValue`
     // rather than a plain local because the join completes asynchronously.
     let stream = StoredValue::new_local(None::<SseStream>);
+    // The peer connections. Not a signal: a `MediaStream` is neither `Send` nor
+    // `Sync`, so it cannot live in one, and nothing in the view reads this.
+    let mesh = StoredValue::new_local(None::<Mesh>);
+    // Room events that arrive while the mesh is still being built (camera + ICE
+    // config), replayed into it as soon as it exists.
+    let early = StoredValue::new(Vec::<SseEvent>::new());
 
     // Join the room, then open the event stream with the session id the join
     // issued. Every capture is `Copy`, so this is callable from the mount and
@@ -122,11 +133,36 @@ pub fn RoomPage() -> impl IntoView {
                     // the stream's opening `resync` carries both, with names.
                     self_id.set(Some(id.clone()));
                     status.set(RoomStatus::Connected);
-                    let handler = sse_handler(peers, chat_messages, status, self_id);
+                    let handler = sse_handler(peers, chat_messages, status, self_id, mesh, early);
                     match SseStream::open(&room, &id, handler) {
                         Ok(s) => stream.set_value(Some(s)),
                         Err(e) => status.set(RoomStatus::Error(e)),
                     }
+
+                    // Media and ICE configuration come after the stream is open on
+                    // purpose: until the mesh exists the handler buffers what the
+                    // room sends, so an offer that lands during the camera prompt is
+                    // replayed rather than dropped.
+                    let local = match get_local_media().await {
+                        Ok(stream) => Some(stream),
+                        Err(e) => {
+                            web_sys::console::warn_1(&format!("joining without media: {e}").into());
+                            None
+                        }
+                    };
+                    let mut built = Mesh::new(&room, &id, local).await;
+                    if status.is_disposed() {
+                        // Left the room while the camera was being set up.
+                        built.close_all();
+                        return;
+                    }
+                    let mut queued = Vec::new();
+                    early.update_value(|list| std::mem::swap(list, &mut queued));
+                    for ev in &queued {
+                        built.on_event(ev);
+                    }
+                    built.attach_pending();
+                    mesh.set_value(Some(built));
                 }
             }
         });
@@ -140,6 +176,14 @@ pub fn RoomPage() -> impl IntoView {
         stream.update_value(|slot| {
             if let Some(mut s) = slot.take() {
                 s.close();
+            }
+        });
+        // Closing the peer connections also releases the camera: a route change in
+        // an SPA does not stop the tracks on its own, and the light would stay on
+        // until the tab closed.
+        mesh.update_value(|slot| {
+            if let Some(mut m) = slot.take() {
+                m.close_all();
             }
         });
     });
@@ -355,61 +399,89 @@ pub fn RoomPage() -> impl IntoView {
     }
 }
 
-/// Translates the room's SSE events into UI state. The media events
-/// (`offer`/`answer`/`ice-candidate`) are ignored until peer connections exist;
-/// everything else is presence and chat.
+/// Translates the room's SSE events into UI state, and hands every event to the
+/// mesh (or to its buffer, while the mesh is still being built).
 fn sse_handler(
     peers: RwSignal<Vec<PeerInfo>>,
     chat: RwSignal<Vec<UiChatMsg>>,
     status: RwSignal<RoomStatus>,
     self_id: RwSignal<Option<String>>,
+    mesh: LocalStore<Option<Mesh>>,
+    early: StoredValue<Vec<SseEvent>>,
 ) -> impl FnMut(SseEvent) {
-    move |ev| match ev {
-        // The authoritative snapshot: sent on every (re)connect, so it replaces
-        // whatever the UI had.
-        SseEvent::Resync {
-            peers: list,
-            chat: history,
-        } => {
-            peers.set(list);
-            let mine = self_id.get_untracked();
-            chat.set(
-                history
-                    .into_iter()
-                    .map(|m| to_ui(m, mine.as_deref()))
-                    .collect(),
-            );
-        }
-        SseEvent::PeerJoined { peer_id, peer_name } => peers.update(|list| {
-            if !list.iter().any(|p| p.peer_id == peer_id) {
-                list.push(PeerInfo { peer_id, peer_name });
+    move |ev| {
+        // Media and presence go to the mesh first: it decides for itself which
+        // events concern it, and it has to see them even where the UI has nothing
+        // to do (an offer for a peer whose tile is already rendered).
+        match &ev {
+            SseEvent::Resync { .. }
+            | SseEvent::PeerJoined { .. }
+            | SseEvent::PeerLeft { .. }
+            | SseEvent::Offer { .. }
+            | SseEvent::Answer { .. }
+            | SseEvent::IceCandidate { .. } => {
+                if mesh.with_value(|slot| slot.is_some()) {
+                    mesh.update_value(|slot| {
+                        if let Some(mesh) = slot {
+                            mesh.on_event(&ev);
+                        }
+                    });
+                } else {
+                    early.update_value(|list| list.push(ev.clone()));
+                }
             }
-        }),
-        SseEvent::PeerLeft { peer_id } => {
-            peers.update(|list| list.retain(|p| p.peer_id != peer_id));
+            SseEvent::ChatMessage { .. } | SseEvent::RoomFull | SseEvent::Error { .. } => {}
         }
-        SseEvent::ChatMessage {
-            from,
-            sender_name,
-            text,
-            timestamp_ms,
-        } => {
-            let mine = self_id.get_untracked();
-            let own = mine.as_deref() == Some(from.as_str());
-            chat.update(|list| {
-                list.push(UiChatMsg {
-                    sender_name: sender_name.unwrap_or_else(|| "Anonymous".to_string()),
-                    time: format_time(timestamp_ms),
-                    from,
-                    text,
-                    timestamp_ms,
-                    own,
-                })
-            });
+
+        // UI state: presence and chat. The media events are the mesh's business,
+        // taken care of above.
+        match ev {
+            // The authoritative snapshot: sent on every (re)connect, so it replaces
+            // whatever the UI had.
+            SseEvent::Resync {
+                peers: list,
+                chat: history,
+            } => {
+                peers.set(list);
+                let mine = self_id.get_untracked();
+                chat.set(
+                    history
+                        .into_iter()
+                        .map(|m| to_ui(m, mine.as_deref()))
+                        .collect(),
+                );
+            }
+            SseEvent::PeerJoined { peer_id, peer_name } => peers.update(|list| {
+                if !list.iter().any(|p| p.peer_id == peer_id) {
+                    list.push(PeerInfo { peer_id, peer_name });
+                }
+            }),
+            SseEvent::PeerLeft { peer_id } => {
+                peers.update(|list| list.retain(|p| p.peer_id != peer_id));
+            }
+            SseEvent::ChatMessage {
+                from,
+                sender_name,
+                text,
+                timestamp_ms,
+            } => {
+                let mine = self_id.get_untracked();
+                let own = mine.as_deref() == Some(from.as_str());
+                chat.update(|list| {
+                    list.push(UiChatMsg {
+                        sender_name: sender_name.unwrap_or_else(|| "Anonymous".to_string()),
+                        time: format_time(timestamp_ms),
+                        from,
+                        text,
+                        timestamp_ms,
+                        own,
+                    })
+                });
+            }
+            SseEvent::RoomFull => status.set(RoomStatus::Full),
+            SseEvent::Error { message } => status.set(RoomStatus::Error(message)),
+            SseEvent::Offer { .. } | SseEvent::Answer { .. } | SseEvent::IceCandidate { .. } => {}
         }
-        SseEvent::RoomFull => status.set(RoomStatus::Full),
-        SseEvent::Error { message } => status.set(RoomStatus::Error(message)),
-        SseEvent::Offer { .. } | SseEvent::Answer { .. } | SseEvent::IceCandidate { .. } => {}
     }
 }
 

@@ -20,6 +20,8 @@
   emitted only when `LEPTOS_WATCH` is set, is absent from production output, and
   has no SSE variant. It is not application push and is exempt.
 - Regular `POST /signal` for client → server (SDP offers/answers, ICE candidates)
+- **Media signals are addressed**: every offer/answer/ICE carries `to` (a `session_id`); the server relays to that one participant only and rewrites `to` → `from`. Unaddressed broadcast corrupts the receiver's single `RTCPeerConnection` for the sender
+- `peer-joined` is broadcast from the SSE handler *after* the joiner subscribes, never from `handle_join`: a `broadcast` with no subscriber is dropped, and a lost offer strands that pair forever (the tie-break allows only one side to offer)
 - SSE event types: `peer-joined`, `peer-left`, `offer`, `answer`, `ice-candidate`, `chat-message`
 - One SSE stream per room visit, owned by `RoomPage` and closed in `on_cleanup`: dropping an `EventSource` does not close its connection, so an unowned stream leaks a socket per visit against the browser's 6-connections-per-host cap
 - All signaling payloads are JSON (serde)

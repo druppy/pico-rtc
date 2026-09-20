@@ -52,6 +52,19 @@ impl RoomState {
             let _ = entry.value().send(json.clone());
         }
     }
+
+    /// Delivers an event to exactly one participant, used for media signals.
+    ///
+    /// Delivering to a peer that has since left is a no-op: the sender has nothing
+    /// better to do with the signal, and the pair is re-established from the next
+    /// `resync` if the peer comes back.
+    pub fn send_to(&self, peer_id: &str, event: &SseEvent) {
+        let Some(tx) = self.participants.get(peer_id) else {
+            return;
+        };
+        let json = serde_json::to_string(event).unwrap_or_default();
+        let _ = tx.value().send(json);
+    }
 }
 
 #[cfg(test)]
@@ -86,6 +99,28 @@ mod tests {
         // b and c receive it; a (the excluded sender) does not.
         assert!(rb.try_recv().is_ok());
         assert!(rc.try_recv().is_ok());
+        assert!(ra.try_recv().is_err());
+    }
+
+    #[test]
+    fn send_to_reaches_only_the_addressee() {
+        let room = RoomState::new(None);
+        for id in ["a", "b", "c"] {
+            let (tx, _) = broadcast::channel(SSE_BUFFER_SIZE);
+            room.participants.insert(id.into(), tx);
+        }
+        let mut ra = room.participants.get("a").unwrap().value().subscribe();
+        let mut rb = room.participants.get("b").unwrap().value().subscribe();
+        let mut rc = room.participants.get("c").unwrap().value().subscribe();
+
+        room.send_to("b", &sample_event());
+
+        assert!(rb.try_recv().is_ok());
+        assert!(ra.try_recv().is_err());
+        assert!(rc.try_recv().is_err());
+
+        // An address that has left the room is simply dropped.
+        room.send_to("gone", &sample_event());
         assert!(ra.try_recv().is_err());
     }
 

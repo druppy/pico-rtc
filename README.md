@@ -114,10 +114,10 @@ sequenceDiagram
 
     Note over B: join event reaches existing peers over their SSE streams
 
-    B->>A: POST /signal — offer
-    A-->>B: peer forwards offer over SSE
-    B->>A: POST /signal — answer
-    B->>A: POST /signal — ICE candidates
+    B->>A: POST /signal — offer addressed to one peer
+    A-->>B: peer forwards offer over SSE (from set, to stripped)
+    B->>A: POST /signal — answer addressed to that peer
+    B->>A: POST /signal — ICE candidates, one peer each
 
     B->>T: ICE connectivity checks
     T-->>B: server-reflexive address, or relay allocation
@@ -273,7 +273,7 @@ pico-rtc/
 │   ├── services/
 │   │   ├── mod.rs
 │   │   ├── signaling.rs    # Client: SSE consumer + signal sender
-│   │   └── webrtc.rs       # Client: RTCPeerConnection wrapper
+│   │   └── webrtc.rs       # Client: RTCPeerConnection mesh (one PC per peer)
 │   └── components/
 │       ├── mod.rs
 │       ├── video_tile.rs   # Single <video> element
@@ -310,13 +310,20 @@ Join (or claim) a room.
 ```
 
 ### `POST /room/:id/signal?session_id=...`
-Relay WebRTC signaling (offer/answer/ICE) to other peers. Requires the
-`session_id` of an active participant (otherwise `400`/`403`).
+Relay one WebRTC signaling message (offer/answer/ICE) to **one** peer. Requires
+the `session_id` of an active participant (otherwise `400`/`403`).
+
+Every media signal is **addressed** with `to`, even though the transport is a
+room-wide SSE channel: a peer that applies an offer, answer or candidate meant
+for someone else silently corrupts the single `RTCPeerConnection` it holds for
+the sender. The server relays to `to` only, and rewrites `to` into `from`. If
+that participant has already left, the signal is dropped and the request still
+returns `200`: the pair is rebuilt from the next `resync`.
 
 ```json
-{"type": "offer", "sdp": "..."}
-{"type": "answer", "sdp": "..."}
-{"type": "ice-candidate", "candidate": "...", "sdp_mid": "...", "sdp_mline_index": 0}
+{"type": "offer", "to": "peer-session-id", "sdp": "..."}
+{"type": "answer", "to": "peer-session-id", "sdp": "..."}
+{"type": "ice-candidate", "to": "peer-session-id", "candidate": "...", "sdp_mid": "...", "sdp_mline_index": 0}
 ```
 
 ### `GET /room/:id/events?session_id=...`

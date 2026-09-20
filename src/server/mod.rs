@@ -5,7 +5,7 @@ pub mod turn;
 
 use axum::{
     Router,
-    extract::{Path, Query, State, Json},
+    extract::{Json, Path, Query, State},
     http::StatusCode,
     response::{Sse, sse::Event, sse::KeepAlive},
     routing::{get, post},
@@ -18,11 +18,11 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
 
+use self::chat::{ChatMessage, ChatStore};
+use self::rooms::RoomState;
 use crate::types::{
     ChatSendRequest, JoinRequest, JoinResponse, PeerInfo, SignalMessage, SseEvent, TurnCredentials,
 };
-use self::chat::{ChatMessage, ChatStore};
-use self::rooms::RoomState;
 
 /// Error that terminates an SSE stream (client fell behind). The connection is
 /// closed; the browser's EventSource auto-reconnects and re-subscribes.
@@ -79,10 +79,7 @@ async fn handle_join(
     let (room, is_new) = match state.rooms.entry(room_id.clone()) {
         Entry::Occupied(o) => (o.into_ref(), false),
         Entry::Vacant(v) => match req.claim_password.as_ref() {
-            Some(pw) if !pw.is_empty() => (
-                v.insert(RoomState::new(Some(pw.clone()))),
-                true,
-            ),
+            Some(pw) if !pw.is_empty() => (v.insert(RoomState::new(Some(pw.clone()))), true),
             _ => return Ok(Json(JoinResponse::NeedPassword {})),
         },
     };
@@ -109,23 +106,18 @@ async fn handle_join(
 
     let peers: Vec<String> = room.participants.iter().map(|e| e.key().clone()).collect();
 
-    // Store display name for this participant (truncated once, used for storage and the join event)
+    // Display name for this participant (truncated once, used for storage and the join event)
     let peer_name: Option<String> = req
         .display_name
         .as_ref()
         .map(|n| n.chars().take(64).collect());
+
+    // Store the display name here, but announce the joiner from the SSE endpoint
+    // (see `handle_sse`): announcing it now would let an existing peer start
+    // offering before the joiner has a stream subscribed to receive it.
     if let Some(ref name) = peer_name {
         room.display_names.insert(self_id.clone(), name.clone());
     }
-
-    // Notify existing peers about the new joiner
-    room.broadcast(
-        &SseEvent::PeerJoined {
-            peer_id: self_id.clone(),
-            peer_name,
-        },
-        None,
-    );
 
     // Per-participant event channel; the participant's SSE endpoint subscribes to it
     let (tx, _rx) = broadcast::channel(rooms::SSE_BUFFER_SIZE);
@@ -154,7 +146,7 @@ async fn handle_sse(
         .get("session_id")
         .filter(|s| !s.is_empty())
         .ok_or(StatusCode::BAD_REQUEST)?;
-    let (tx, resync) = {
+    let (live, resync) = {
         let room = state.rooms.get(&room_id).ok_or(StatusCode::NOT_FOUND)?;
         let tx = room
             .participants
@@ -172,18 +164,32 @@ async fn handle_sse(
             .filter(|e| e.key() != session_id)
             .map(|e| PeerInfo {
                 peer_id: e.key().clone(),
-                peer_name: room
-                    .display_names
-                    .get(e.key())
-                    .map(|n| n.value().clone()),
+                peer_name: room.display_names.get(e.key()).map(|n| n.value().clone()),
             })
             .collect();
         let chat = state.chat.history(&room_id, 50);
-        (tx, SseEvent::Resync { peers, chat })
+
+        // Subscribe first, then announce. A peer that reacts to `peer-joined` by
+        // offering must find the joiner already listening: `broadcast` drops the
+        // event when the target has no subscriber yet, and a lost offer would
+        // strand that pair, because the tie-break says only *that* peer may offer.
+        // Reconnecting re-announces; clients treat a known peer as a no-op.
+        let live = BroadcastStream::new(tx.subscribe());
+        room.broadcast(
+            &SseEvent::PeerJoined {
+                peer_id: session_id.clone(),
+                peer_name: room
+                    .display_names
+                    .get(session_id)
+                    .map(|n| n.value().clone()),
+            },
+            Some(session_id),
+        );
+        (live, SseEvent::Resync { peers, chat })
     };
 
     let resync_event = Event::default().data(serde_json::to_string(&resync).unwrap_or_default());
-    let live = BroadcastStream::new(tx.subscribe()).map(|item| match item {
+    let live = live.map(|item| match item {
         Ok(data) => Ok(Event::default().data(data)),
         // Lagged: client fell behind. End the stream — the browser's EventSource
         // auto-reconnects and re-subscribes (getting a fresh resync).
@@ -196,6 +202,12 @@ async fn handle_sse(
 
 // ─── Signal Relay ────────────────────────────────────────────────────────────
 
+/// Relays one media signal to the participant it is addressed to.
+///
+/// Not a room broadcast on purpose: every peer would otherwise see every offer,
+/// answer and candidate, and a peer cannot tell a candidate meant for a third party
+/// from one meant for it — both arrive from the same sender, whose single
+/// `RTCPeerConnection` it then pollutes with unreachable candidates.
 async fn handle_signal(
     State(state): State<Arc<AppState>>,
     Path(room_id): Path<String>,
@@ -213,29 +225,34 @@ async fn handle_signal(
         return Err(StatusCode::FORBIDDEN);
     }
 
-    let event = match signal {
-        SignalMessage::Offer { sdp } => SseEvent::Offer {
-            from: from.clone(),
-            sdp,
-        },
-        SignalMessage::Answer { sdp } => SseEvent::Answer {
-            from: from.clone(),
-            sdp,
-        },
+    match signal {
+        SignalMessage::Offer { to, sdp } => {
+            room.send_to(&to, &SseEvent::Offer { from, sdp });
+        }
+        SignalMessage::Answer { to, sdp } => {
+            room.send_to(&to, &SseEvent::Answer { from, sdp });
+        }
         SignalMessage::IceCandidate {
+            to,
             candidate,
             sdp_mid,
             sdp_mline_index,
-        } => SseEvent::IceCandidate {
-            from: from.clone(),
-            candidate,
-            sdp_mid,
-            sdp_mline_index,
-        },
+        } => {
+            room.send_to(
+                &to,
+                &SseEvent::IceCandidate {
+                    from,
+                    candidate,
+                    sdp_mid,
+                    sdp_mline_index,
+                },
+            );
+        }
         SignalMessage::Renegotiate => return Err(StatusCode::NOT_IMPLEMENTED),
-    };
+    }
 
-    room.broadcast(&event, Some(&from));
+    // A peer that left mid-signal is not the sender's problem: the pair is rebuilt
+    // from the next `resync`, so reporting it as failure would only invite retries.
     Ok(StatusCode::OK)
 }
 
@@ -308,12 +325,8 @@ async fn handle_chat_history(
 }
 
 async fn handle_turn(State(state): State<Arc<AppState>>) -> Json<TurnCredentials> {
-    let creds = turn::generate_credentials(
-        &state.turn_secret,
-        &state.turn_host,
-        state.turn_port,
-        3600,
-    );
+    let creds =
+        turn::generate_credentials(&state.turn_secret, &state.turn_host, state.turn_port, 3600);
     Json(creds)
 }
 

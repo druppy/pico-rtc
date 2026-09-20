@@ -1,15 +1,27 @@
 use serde::{Deserialize, Serialize};
 
 /// A signaling message sent client → server via POST /api/room/:id/signal
+///
+/// `to` addresses one participant. The transport is a room-wide broadcast, but
+/// media signals are not: a peer that applies an offer or an ICE candidate meant
+/// for someone else silently corrupts its own connection, because both land on the
+/// single `RTCPeerConnection` it has for the *sender*.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum SignalMessage {
     #[serde(rename = "offer")]
-    Offer { sdp: String },
+    Offer {
+        to: String,
+        sdp: String,
+    },
     #[serde(rename = "answer")]
-    Answer { sdp: String },
+    Answer {
+        to: String,
+        sdp: String,
+    },
     #[serde(rename = "ice-candidate")]
     IceCandidate {
+        to: String,
         candidate: String,
         sdp_mid: Option<String>,
         sdp_mline_index: Option<u16>,
