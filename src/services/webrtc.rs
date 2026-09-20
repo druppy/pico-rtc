@@ -1,32 +1,12 @@
 // WebRTC peer connection management.
 // This module is a scaffold — the full peer connection wiring requires
 // careful async handling of RTCPeerConnection state machines.
-// The signaling transport (SSE + POST) is fully working; this file
-// provides the structure to plug in the RTCPeerConnection logic.
+// The signaling transport (SSE + POST) is fully working; incoming SSE events
+// are handed to a callback owned by the room component (see
+// `services::signaling::SseStream::open`), which is where peer connections
+// will be driven from once they exist.
 
 use wasm_bindgen::prelude::*;
-use crate::types::SseEvent;
-
-// Global handler registered by the room component on mount.
-// When an SSE event arrives, signaling calls dispatch_sse_event which
-// forwards here. The room component sets this up.
-thread_local! {
-    static EVENT_HANDLER: std::cell::RefCell<Option<Box<dyn Fn(SseEvent)>>> = const { std::cell::RefCell::new(None) };
-}
-
-/// Register the SSE event handler (called from the room component).
-pub fn register_handler<F: Fn(SseEvent) + 'static>(f: F) {
-    EVENT_HANDLER.with(|h| *h.borrow_mut() = Some(Box::new(f)));
-}
-
-/// Called by the signaling module when an SSE event arrives.
-pub fn dispatch_sse_event(event: SseEvent) {
-    EVENT_HANDLER.with(|h| {
-        if let Some(handler) = &*h.borrow() {
-            handler(event);
-        }
-    });
-}
 
 /// Initialize local media (camera + mic).
 /// Returns a MediaStream as JsValue (to avoid web-sys type issues in this scaffold).

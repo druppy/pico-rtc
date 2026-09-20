@@ -15,8 +15,13 @@
 
 ## Signaling
 - **SSE (Server-Sent Events)** for server → client push — NOT WebSocket
+- Scope of that rule: application traffic only. `cargo leptos watch` injects a
+  browser-refresh channel served by the build tool on loopback `:3001`; it is
+  emitted only when `LEPTOS_WATCH` is set, is absent from production output, and
+  has no SSE variant. It is not application push and is exempt.
 - Regular `POST /signal` for client → server (SDP offers/answers, ICE candidates)
 - SSE event types: `peer-joined`, `peer-left`, `offer`, `answer`, `ice-candidate`, `chat-message`
+- One SSE stream per room visit, owned by `RoomPage` and closed in `on_cleanup`: dropping an `EventSource` does not close its connection, so an unowned stream leaks a socket per visit against the browser's 6-connections-per-host cap
 - All signaling payloads are JSON (serde)
 
 ## Chat
@@ -32,6 +37,7 @@
 - Optional display name: entered by user, stored in browser cookie `wr_name` (1yr, SameSite=Lax)
 - Stable user ID: auto-generated UUID v4, stored in cookie `wr_uid` (1yr, SameSite=Lax)
 - Both sent in `JoinRequest.display_name` and `JoinRequest.user_id`
+- Participant slot (`JoinRequest.session_id`, echoed back as `self_id`): UUID v4 in `sessionStorage` key `wr_sid` — deliberately NOT a cookie, so each tab is its own participant and a reload reuses the same slot
 - Server stores display names per-room (in-memory DashMap)
 - Cookie-based identity gives: consistent name across visits, trackable ID for moderation
 - Future: cookie ID becomes the `sub` claim in a JWT when auth is added
@@ -54,8 +60,11 @@
 - Graceful shutdown: `tokio::signal::ctrl_c` + `axum::serve` with graceful handle
 
 ## Build & Deploy
-- Build: `trunk build` for client bundle, `cargo build --release` for server binary
-- Single binary deploys: server binary + static files in `dist/`
+- Build: `cargo leptos build` (or `cargo leptos watch` in dev) builds wasm client + server in one pass
+- Single crate: `lib` target → wasm (`--features=csr`), `webrtc-room` bin target → native (`--features=ssr`); configured in `[package.metadata.leptos]`
+- No Trunk and no committed `index.html` — the server writes the HTML shell into `site-root` at startup
+- `wasm-bindgen` crate is pinned with `=` and `wasm-bindgen-cli` must be installed at that exact version
+- Single binary deploys: server binary + static files in `target/site/`
 - coturn: separate process (not embedded)
 - Reverse proxy: Caddy or Nginx for TLS (required — WebRTC mandates secure context)
 - Docker: single-stage Dockerfile for server, coturn via `network_mode: host`

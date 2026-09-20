@@ -102,6 +102,11 @@
     flex-shrink: 0;
 }
 
+.chat-msg.own {
+    border-left: 2px solid var(--pico-primary-background);
+    padding-left: 0.5rem;
+}
+
 .chat-msg time {
     margin-left: auto;
     font-size: 0.75rem;
@@ -127,6 +132,12 @@
 /* Error styling */
 .error {
     color: var(--pico-del-color);
+}
+
+/* Join gate: set or enter the room password */
+.room-gate {
+    max-width: 24rem;
+    margin: 1rem auto;
 }
 
 /* Nav header inside room */

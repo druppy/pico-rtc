@@ -7,12 +7,87 @@ use crate::types::{JoinRequest, JoinResponse, SseEvent};
 /// Room connection status
 #[derive(Debug, Clone, PartialEq)]
 pub enum RoomStatus {
+    /// Nothing attempted yet (or a previous attempt was abandoned).
     Idle,
     Joining,
+    /// Room does not exist yet; the caller must supply a password to claim it.
     NeedPassword,
+    /// Room exists and is locked; the password was missing or wrong.
     PasswordRequired,
+    /// Room is at capacity.
+    Full,
     Connected,
-    Error,
+    /// Transport/protocol failure, with a message for the UI.
+    Error(String),
+}
+
+impl RoomStatus {
+    /// `Some(true)` when the user should *set* a new room password,
+    /// `Some(false)` when they should *enter* an existing one, `None` otherwise.
+    pub fn password_prompt(&self) -> Option<bool> {
+        match self {
+            RoomStatus::NeedPassword => Some(true),
+            RoomStatus::PasswordRequired => Some(false),
+            _ => None,
+        }
+    }
+}
+
+/// A live SSE subscription to `GET /api/room/:id/events`.
+///
+/// Owns both the browser's `EventSource` and the `onmessage` `Closure` so the
+/// connection can be torn down for real. Dropping an `EventSource` does *not*
+/// close its HTTP connection, and a `forget()`-ten `Closure` is leaked forever;
+/// in an SPA, leaving a room is a client-side route change, so an unowned stream
+/// costs a permanent socket per visit until the browser's 6-connections-per-host
+/// cap stalls the tab. Callers should `close()` it from `on_cleanup`.
+pub struct SseStream {
+    source: EventSource,
+    on_message: Option<Closure<dyn FnMut(MessageEvent)>>,
+}
+
+impl SseStream {
+    /// Opens the room's event stream, parsing every SSE `data:` payload as
+    /// [`SseEvent`] and handing it to `on_event`.
+    pub fn open<F>(room_id: &str, session_id: &str, mut on_event: F) -> Result<Self, String>
+    where
+        F: FnMut(SseEvent) + 'static,
+    {
+        let url = format!("/api/room/{room_id}/events?session_id={session_id}");
+        let source = EventSource::new(&url).map_err(|e| format!("EventSource: {e:?}"))?;
+
+        let on_message = Closure::wrap(Box::new(move |ev: MessageEvent| {
+            let data = ev.data().as_string().unwrap_or_default();
+            match serde_json::from_str::<SseEvent>(&data) {
+                Ok(event) => on_event(event),
+                // Unknown/rotated payloads must not kill the stream silently.
+                Err(e) => web_sys::console::warn_1(
+                    &format!("ignoring unparseable SSE event ({e}): {data}").into(),
+                ),
+            }
+        }) as Box<dyn FnMut(MessageEvent)>);
+
+        source.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
+        Ok(Self {
+            source,
+            on_message: Some(on_message),
+        })
+    }
+
+    /// Closes the connection and releases the message handler.
+    pub fn close(&mut self) {
+        // Detach the handler before dropping the closure: JS must not be able to
+        // call it afterwards.
+        self.source.set_onmessage(None);
+        self.source.close();
+        self.on_message = None;
+    }
+}
+
+impl Drop for SseStream {
+    fn drop(&mut self) {
+        self.close();
+    }
 }
 
 /// POST /api/room/:id/join
@@ -52,24 +127,6 @@ pub async fn send_signal(
         return Err(format!("signal send failed: HTTP {}", resp.status()));
     }
     Ok(())
-}
-
-/// Open an EventSource SSE stream for receiving events from the server.
-pub fn open_sse_stream(room_id: &str, session_id: &str) -> Result<EventSource, String> {
-    let url = format!("/api/room/{room_id}/events?session_id={session_id}");
-    let source = EventSource::new(&url).map_err(|e| format!("{e:?}"))?;
-
-    let onmessage = Closure::wrap(Box::new(move |ev: MessageEvent| {
-        let data = ev.data().as_string().unwrap_or_default();
-        if let Ok(event) = serde_json::from_str::<SseEvent>(&data) {
-            crate::services::webrtc::dispatch_sse_event(event);
-        }
-    }) as Box<dyn FnMut(MessageEvent)>);
-
-    source.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
-    onmessage.forget();
-
-    Ok(source)
 }
 
 /// POST /api/room/:id/chat?session_id=... — send a chat message

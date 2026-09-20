@@ -1,20 +1,28 @@
 pub mod signaling;
 pub mod webrtc;
 
-/// Get or create a stable session ID (survives page reload via sessionStorage).
-pub fn get_or_create_session_id() -> String {
-    let storage = web_sys::window().and_then(|w| w.session_storage().ok().flatten());
+/// This tab's participant slot: a UUID v4 kept in `sessionStorage`.
+///
+/// Not a cookie on purpose: a cookie is shared by every tab, but each tab is a
+/// separate participant. `sessionStorage` survives a reload (so a refresh
+/// re-claims the same slot instead of taking another one from the room's
+/// capacity) while a second tab still gets its own id.
+pub fn session_id() -> String {
+    const KEY: &str = "wr_sid";
+    let Some(store) = web_sys::window().and_then(|w| w.session_storage().ok().flatten()) else {
+        // Storage can be unavailable (blocked cookies, Safari private mode).
+        return uuid::Uuid::new_v4().to_string();
+    };
 
-    if let Some(store) = storage {
-        if let Ok(Some(id)) = store.get_item("session_id") {
-            if !id.is_empty() {
-                return id;
-            }
-        }
-        let id = uuid::Uuid::new_v4().to_string();
-        let _ = store.set_item("session_id", &id);
+    if let Some(id) = store
+        .get_item(KEY)
+        .ok()
+        .flatten()
+        .filter(|id| id.len() >= 8)
+    {
         return id;
     }
-    // Fallback (shouldn't happen in browser)
-    uuid::Uuid::new_v4().to_string()
+    let id = uuid::Uuid::new_v4().to_string();
+    let _ = store.set_item(KEY, &id);
+    id
 }
