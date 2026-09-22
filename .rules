@@ -8,8 +8,8 @@
 ## Frontend
 - Leptos 0.8+ (CSR mode — WebRTC is inherently client-side)
 - Semantic HTML only (`<main>`, `<section>`, `<header>`, `<figure>`, `<video>`, `<details>`, etc.)
-- CSS: PicoCSS 2.x (no custom framework, utility classes allowed for layout only)
-- Styling: minimal custom CSS in a single file, no CSS-in-JS, no Tailwind
+- CSS: PicoCSS 2.x, **vendored as Sass sources under `style/pico/`** — no CDN, no third-party request from the page
+- Styling: SCSS in one entry file (`style/main.scss`), compiled by cargo-leptos' Dart Sass; no CSS-in-JS, no Tailwind; custom rules use `var(--pico-*)` hooks
 - Icons: none for MVP (future: inline SVG spritesheet)
 - All user-facing strings: inline for now (future: `rust-i18n` or similar)
 

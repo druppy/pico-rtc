@@ -1,0 +1,322 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// pico-rtc stylesheet entry point
+//
+// Wiring (maintainer's step, in Cargo.toml [package.metadata.leptos]):
+//
+//     style-file = "style/main.scss"
+//
+// cargo-leptos shells out to dart-sass as `sass <this file>` — stdout only, no
+// output path, and `--no-source-map` is added for release builds only. It then
+// appends the optional Tailwind output and always round-trips the result
+// through Lightning CSS against `browserquery`, minifying in release.
+//
+// Partials are resolved relative to this file, so no sass load paths are
+// needed (cargo-leptos passes none anyway).
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ─── Pico 2.1.1 (vendored: see style/pico/README.md) ────────────────────────
+//
+// `pico.scss` is Pico's public entry — two lines: `@forward "settings"` then
+// `@use "index"`. The configuration reaches the settings module *through* that
+// forward: Sass installs `with (...)` values into a module the first time it
+// loads, so every partial that later does `@use "../settings"` sees them.
+//
+// Naming note: Pico's Sass knobs are unprefixed (`$theme-color`, `$modules`,
+// `$enable-*`). The familiar `--pico-*` names are the *CSS custom properties*
+// it emits; `$css-var-prefix` controls that prefix, and is the only reason the
+// two get confused.
+//
+// The knobs, for reference (all defined in style/pico/_settings.scss):
+//
+//   $theme-color                 Accent colour name (azure is Pico's default;
+//                                amber, blue, cyan, green, red, ... ).
+//   $css-var-prefix              Prefix for emitted CSS custom properties.
+//                                Must start with "--". Left at "--pico-" so the
+//                                var(--pico-*) hooks in our markup keep working.
+//   $modules                     Map disabling whole modules, e.g.
+//                                map.merge($modules, ("content/table": false)).
+//                                Not used: we keep the stock module set.
+//   $enable-classes              false → "classless" build (drops .container,
+//                                .grid, ... ). Must stay true.
+//   $enable-viewport             Centered <header>/<main>/<footer> viewport.
+//   $semantic-root-element       Root Pico scopes semantic landmarks to.
+//   $enable-semantic-container   <header>/<main>/<footer> as containers.
+//   $enable-responsive-spacings  Spacings scale with breakpoint.
+//   $enable-responsive-typography  Root font-size scales with breakpoint.
+//   $enable-transitions          Transitions/animations.
+//   $enable-important            Pico appends !important to its declarations.
+//   $parent-selector             Wrap every element rule in one selector.
+//
+// Only one knob is pinned, and to its stock value: the accent colour is the
+// single setting the maintainer is most likely to want to change, so it gets an
+// explicit home here rather than being buried in a vendored file we must not
+// hand-edit. Everything else stays at Pico's defaults.
+@use "pico/pico" with (
+  $theme-color: "azure",
+);
+
+// ─── App styles ─────────────────────────────────────────────────────────────
+//
+// Pico emits only ~20 `!important` declarations (form validation and
+// `prefers-reduced-motion`), so plain specificity wins here and no rule below
+// needs to fight it.
+
+// The room: a narrow strip for your own feed, four times the width for the room.
+// `.is-speaker` / `.is-gallery` is the user's choice of how the feeds half is
+// divided; the half itself never moves.
+.stage {
+  display: grid;
+  grid-template-columns: 1fr 4fr;
+  gap: 0.5rem;
+  padding-block: 0.5rem;
+
+  > .video-tile.local {
+    display: flex;
+    flex-direction: column;
+
+    // The strip is as tall as the feeds beside it, so it crops rather than
+    // keeping a 16:9 box of its own.
+    video {
+      flex: 1;
+      min-height: 0;
+      aspect-ratio: auto;
+    }
+
+    figcaption {
+      flex: none;
+    }
+  }
+
+  &.is-speaker .feeds {
+    grid-template-columns: 1fr;
+
+    > .video-tile:not(.is-stage) {
+      display: none;
+    }
+  }
+}
+
+.feeds {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+  gap: 0.5rem;
+  align-content: start;
+}
+
+.video-tile {
+  margin: 0;
+  background: var(--pico-secondary-background);
+  border-radius: var(--pico-border-radius);
+  overflow: hidden;
+
+  video {
+    display: block;
+    width: 100%;
+    aspect-ratio: 16 / 9;
+    object-fit: cover;
+  }
+
+  // Your own preview, mirrored so moving left reads as moving left.
+  &.local video {
+    transform: scaleX(-1);
+  }
+
+  figcaption {
+    padding: 0.25rem 0.5rem;
+    font-size: 0.8rem;
+    text-align: center;
+  }
+}
+
+.stage-empty {
+  grid-column: 1 / -1;
+  text-align: center;
+  padding-block: 2rem;
+  margin: 0;
+}
+
+// ─── Controls ────────────────────────────────────────────────────────────────
+.room-controls {
+  display: flex;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  padding-block: 1rem;
+
+  button {
+    width: auto;
+    margin: 0;
+    padding: 0.5rem 1rem;
+  }
+}
+
+// ─── Chat overlay ────────────────────────────────────────────────────────────
+// A window over the room rather than a column beside it: the feeds are the point
+// of the page, and chat should not cost them width. Hidden means `display: none`,
+// so a shut overlay takes no space and holds no focus.
+.chat-overlay {
+  position: fixed;
+  inset-inline-end: 0;
+  inset-block-end: 0;
+  z-index: 10;
+  display: none;
+  flex-direction: column;
+  gap: 0.5rem;
+  width: min(24rem, 100%);
+  max-height: min(28rem, 70dvh);
+  padding: 1rem;
+  background: var(--pico-card-background-color);
+  border: 1px solid var(--pico-muted-border-color);
+  border-radius: var(--pico-border-radius);
+
+  &.is-open {
+    display: flex;
+  }
+}
+
+.chat-overlay-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+
+  h3 {
+    margin: 0;
+  }
+
+  .chat-close {
+    width: auto;
+    margin: 0;
+    padding: 0.25rem 0.75rem;
+  }
+}
+
+.chat-messages {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 0.25rem;
+  min-height: 8rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  overflow-y: auto;
+}
+
+.chat-msg {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  font-size: 0.9rem;
+
+  strong {
+    flex-shrink: 0;
+  }
+
+  &.own {
+    padding-left: 0.5rem;
+    border-left: 2px solid var(--pico-primary-background);
+  }
+
+  time {
+    margin-left: auto;
+    font-size: 0.75rem;
+    opacity: 0.6;
+  }
+}
+
+.chat-overlay form {
+  display: flex;
+  gap: 0.5rem;
+  margin: 0;
+
+  input {
+    flex: 1;
+    margin: 0;
+  }
+
+  button {
+    width: auto;
+    margin: 0;
+  }
+}
+
+// Count of messages that arrived while the overlay was shut. Sitting on the
+// toggle is the point: it is dismissed by the same click that opens the chat.
+.chat-badge {
+  display: inline-grid;
+  place-items: center;
+  min-inline-size: 1.35rem;
+  margin-inline-start: 0.4rem;
+  padding-inline: 0.3rem;
+  border-radius: 999px;
+  background-color: var(--pico-primary-background);
+  color: var(--pico-primary-inverse);
+  font-size: 0.75rem;
+  line-height: 1.5;
+}
+
+// ─── Identity bar, gate, misc ────────────────────────────────────────────────
+.identity-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 1rem;
+  padding-block: 0.25rem;
+
+  label {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin: 0;
+  }
+
+  input {
+    width: auto;
+    margin: 0;
+  }
+}
+
+.room-gate {
+  max-width: 24rem;
+  margin-inline: auto;
+}
+
+.error {
+  color: var(--pico-del-color);
+}
+
+.muted {
+  color: var(--pico-muted-color);
+}
+
+header nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+// ─── Small screens ───────────────────────────────────────────────────────────
+// Only a gallery: a phone held next to a face has neither the width for a 1:4
+// split nor the room for a tile that is 20% of it. The mode toggle goes with the
+// mode it cannot honour.
+@media (max-width: 640px) {
+  .stage {
+    grid-template-columns: 1fr;
+
+    &.is-speaker .feeds > .video-tile:not(.is-stage) {
+      display: block;
+    }
+
+    > .video-tile.local video {
+      aspect-ratio: 16 / 9;
+    }
+  }
+
+  .stage-mode {
+    display: none;
+  }
+
+  .chat-overlay {
+    width: 100%;
+  }
+}

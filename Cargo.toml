@@ -60,6 +60,12 @@ web-sys = { version = "0.3", features = [
     # has no Deref chain between the two.
     "HtmlMediaElement",
     "HtmlAudioElement",
+    # Loudness detection: who owns the large tile.
+    "AudioContext",
+    "AudioContextState",
+    "AudioNode",
+    "AnalyserNode",
+    "MediaStreamAudioSourceNode",
     "Element",
     "EventSource",
     "EventSourceInit",
@@ -114,8 +120,10 @@ bin-target = "webrtc-room"
 site-root = "target/site"
 site-pkg-dir = "pkg"
 
-# Plain CSS, passed through Lightning CSS for the browserquery target.
-style-file = "style/main.css"
+# SCSS: cargo-leptos compiles this entry with Dart Sass, then passes the result
+# through Lightning CSS for the browserquery target. Pico is vendored under
+# style/pico/ because cargo-leptos passes no sass load paths.
+style-file = "style/main.scss"
 browserquery = "defaults"
 
 # Dev bind address + live-reload port. cargo-leptos exports these as

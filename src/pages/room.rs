@@ -1,9 +1,11 @@
+use std::time::Duration;
+
 use leptos::prelude::*;
 use leptos_router::hooks::use_params_map;
 use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::spawn_local;
 
-use crate::components::VideoTile;
+use crate::components::{Controls, VideoTile};
 use crate::pages::home::{get_cookie, set_cookie};
 use crate::services::session_id;
 use crate::services::signaling::{RoomStatus, SseStream, join_room, send_chat};
@@ -23,6 +25,16 @@ struct UiChatMsg {
     own: bool,
 }
 
+/// Everything the event handler may write about chat, bundled because the three
+/// move together: the list, whether anyone is looking at it, and what arrived
+/// while nobody was.
+#[derive(Clone, Copy)]
+struct ChatUi {
+    messages: RwSignal<Vec<UiChatMsg>>,
+    open: RwSignal<bool>,
+    unread: RwSignal<u32>,
+}
+
 /// How to authenticate a join attempt. The server distinguishes "room does not
 /// exist, claim it" from "room is locked, unlock it", so the UI can ask for the
 /// right thing without guessing.
@@ -40,6 +52,15 @@ enum Creds {
 /// The storage [`StoredValue::new_local`] picks. The mesh holds JS handles, which
 /// are not `Send`, so it cannot go in the default (synchronised) storage.
 type LocalStore<T> = StoredValue<T, leptos::reactive::owner::LocalStorage>;
+
+/// How often the stage asks the meter who is loudest. Fast enough that a change of
+/// speaker lands before you finish noticing the old one; slow enough that the poll
+/// is not itself something you can hear.
+const LEVEL_POLL_MS: u64 = 350;
+
+/// DOM id of the chat list, so the scroll-to-bottom effect can find it. Must match
+/// the `id` on the `<ul>` in the view.
+const CHAT_LOG_ID: &str = "chat-log";
 
 #[component]
 pub fn RoomPage() -> impl IntoView {
@@ -67,6 +88,55 @@ pub fn RoomPage() -> impl IntoView {
     // The last verification attempt was rejected, so the gate can say so instead
     // of silently redrawing the same form.
     let bad_password = RwSignal::new(false);
+
+    // Stage layout: `false` gives the large tile to whoever speaks, `true` shows
+    // everyone at once. Small screens ignore this and are always a gallery — see
+    // `.stage` in the stylesheet.
+    let gallery = RwSignal::new(false);
+    // Who the level meter currently hands the large tile to. `None` while the
+    // room is quiet, which is exactly when the stage needs a fallback.
+    let speaker = RwSignal::new(None::<String>);
+    // The chat is an overlay the user opens, not part of the page flow, so it
+    // carries its own open flag and its backlog.
+    let chat_open = RwSignal::new(false);
+    let unread = RwSignal::new(0u32);
+
+    // The feed shown large: whoever the meter picked or, in a quiet room, the
+    // first peer. The fallback is not cosmetic — a stage with no owner is a
+    // blank tile — and the memo means a re-poll that changes nothing
+    // re-renders nothing either.
+    let on_stage = Memo::new(move |_| {
+        let list = peers.get();
+        // The meter is polled, so it can name a peer that left a moment ago; in
+        // speaker mode that would hide every feed, hence the membership check.
+        speaker
+            .get()
+            .filter(|who| list.iter().any(|peer| peer.peer_id == *who))
+            .or_else(|| list.first().map(|peer| peer.peer_id.clone()))
+    });
+
+    // Handle for the poll that keeps `speaker` fresh. Cleared in `on_cleanup`.
+    let ticker = StoredValue::new_local(None::<IntervalHandle>);
+
+    // Keeps the chat list pinned to its newest message. Tracked on both the open
+    // flag and the list, so it runs when a message arrives *or* when the overlay
+    // is opened, and never while the overlay is hidden.
+    Effect::new(move || {
+        if !chat_open.get() {
+            return;
+        }
+        let _ = chat_messages.get().len();
+        // Found by id, the same way the mesh finds its `<video>` elements: this
+        // whole branch is rebuilt whenever the join status changes, so a `NodeRef`
+        // captured at mount would point at a detached node.
+        if let Some(list) = web_sys::window()
+            .and_then(|window| window.document())
+            .and_then(|document| document.get_element_by_id(CHAT_LOG_ID))
+        {
+            let bottom = list.scroll_height();
+            list.set_scroll_top(bottom);
+        }
+    });
 
     // Owned by this component and closed in `on_cleanup` below. `StoredValue`
     // rather than a plain local because the join completes asynchronously.
@@ -133,7 +203,18 @@ pub fn RoomPage() -> impl IntoView {
                     // the stream's opening `resync` carries both, with names.
                     self_id.set(Some(id.clone()));
                     status.set(RoomStatus::Connected);
-                    let handler = sse_handler(peers, chat_messages, status, self_id, mesh, early);
+                    let handler = sse_handler(
+                        peers,
+                        ChatUi {
+                            messages: chat_messages,
+                            open: chat_open,
+                            unread,
+                        },
+                        status,
+                        self_id,
+                        mesh,
+                        early,
+                    );
                     match SseStream::open(&room, &id, handler) {
                         Ok(s) => stream.set_value(Some(s)),
                         Err(e) => status.set(RoomStatus::Error(e)),
@@ -163,6 +244,33 @@ pub fn RoomPage() -> impl IntoView {
                     }
                     built.attach_pending();
                     mesh.set_value(Some(built));
+
+                    // Levels live in the mesh, not in a signal, so something has to
+                    // ask them regularly. Once per visit is enough: a reconnect
+                    // rebuilds the mesh but keeps this poll.
+                    if ticker.with_value(|slot| slot.is_none()) {
+                        match set_interval_with_handle(
+                            move || {
+                                // A later tick can outlive the component.
+                                if speaker.is_disposed() {
+                                    return;
+                                }
+                                let mut who = None;
+                                mesh.update_value(|slot| {
+                                    if let Some(mesh) = slot {
+                                        who = mesh.dominant_speaker();
+                                    }
+                                });
+                                speaker.set(who);
+                            },
+                            Duration::from_millis(LEVEL_POLL_MS),
+                        ) {
+                            Ok(handle) => ticker.set_value(Some(handle)),
+                            Err(e) => web_sys::console::warn_1(
+                                &format!("speaker detection unavailable: {e:?}").into(),
+                            ),
+                        }
+                    }
                 }
             }
         });
@@ -184,6 +292,13 @@ pub fn RoomPage() -> impl IntoView {
         mesh.update_value(|slot| {
             if let Some(mut m) = slot.take() {
                 m.close_all();
+            }
+        });
+        // An interval left running keeps its closure, and the mesh it reaches for,
+        // alive for the life of the tab.
+        ticker.update_value(|slot| {
+            if let Some(handle) = slot.take() {
+                handle.clear();
             }
         });
     });
@@ -329,28 +444,74 @@ pub fn RoomPage() -> impl IntoView {
                 }
                 .into_any(),
                 RoomStatus::Connected => view! {
-                    // Peer media is attached once the RTCPeerConnection layer lands;
-                    // the tiles track presence in the meantime.
-                    <section class="video-grid" aria-label="Video feeds">
+                    // One fifth of the width for the self preview, four for the room.
+                    // Which remote feed owns that space is `on_stage`'s decision; the
+                    // mode class on `.stage` decides whether there is only one.
+                    <section
+                        class="stage"
+                        class:is-speaker=move || !gallery.get()
+                        class:is-gallery=move || gallery.get()
+                        aria-label="Video feeds"
+                    >
                         <VideoTile id="local" label="You" is_local=true/>
-                        <For
-                            each=move || peers.get()
-                            key=|peer| peer.peer_id.clone()
-                            children=move |peer| {
-                                view! {
-                                    <VideoTile
-                                        id=peer.peer_id.clone()
-                                        label=peer_label(&peer)
-                                        is_local=false
-                                    />
+
+                        <div class="feeds">
+                            <For
+                                each=move || peers.get()
+                                key=|peer| peer.peer_id.clone()
+                                children=move |peer| {
+                                    let id = peer.peer_id.clone();
+                                    let label = peer_label(&peer);
+                                    let is_stage = {
+                                        let on_stage = on_stage;
+                                        let watched = id.clone();
+                                        Signal::derive(move || {
+                                            on_stage.get().as_deref() == Some(watched.as_str())
+                                        })
+                                    };
+                                    view! {
+                                        <VideoTile
+                                            id=id
+                                            label=label
+                                            is_local=false
+                                            is_stage=is_stage
+                                        />
+                                    }
                                 }
-                            }
-                        />
+                            />
+                            {move || {
+                                peers
+                                    .get()
+                                    .is_empty()
+                                    .then(|| view! {
+                                        <p class="muted stage-empty">
+                                            "Nobody else is here yet. Share the room link."
+                                        </p>
+                                    })
+                            }}
+                        </div>
                     </section>
 
-                    <aside class="chat-panel" aria-label="Chat">
-                        <h3>"Chat"</h3>
-                        <ul class="chat-messages" aria-live="polite">
+                    <Controls gallery=gallery chat_open=chat_open unread=unread/>
+
+                    <aside
+                        id="chat-overlay"
+                        class="chat-overlay"
+                        class:is-open=move || chat_open.get()
+                        aria-label="Chat"
+                    >
+                        <header class="chat-overlay-head">
+                            <h3>"Chat"</h3>
+                            <button
+                                type="button"
+                                class="chat-close"
+                                aria-label="Close chat"
+                                on:click=move |_| chat_open.set(false)
+                            >
+                                "Close"
+                            </button>
+                        </header>
+                        <ul id=CHAT_LOG_ID class="chat-messages" aria-live="polite">
                             <For
                                 // Keyed by index *and* content identity: a `resync`
                                 // replaces the whole list, and rows whose key survived
@@ -403,7 +564,7 @@ pub fn RoomPage() -> impl IntoView {
 /// mesh (or to its buffer, while the mesh is still being built).
 fn sse_handler(
     peers: RwSignal<Vec<PeerInfo>>,
-    chat: RwSignal<Vec<UiChatMsg>>,
+    chat: ChatUi,
     status: RwSignal<RoomStatus>,
     self_id: RwSignal<Option<String>>,
     mesh: LocalStore<Option<Mesh>>,
@@ -444,7 +605,7 @@ fn sse_handler(
             } => {
                 peers.set(list);
                 let mine = self_id.get_untracked();
-                chat.set(
+                chat.messages.set(
                     history
                         .into_iter()
                         .map(|m| to_ui(m, mine.as_deref()))
@@ -467,7 +628,12 @@ fn sse_handler(
             } => {
                 let mine = self_id.get_untracked();
                 let own = mine.as_deref() == Some(from.as_str());
-                chat.update(|list| {
+                // Your own echo is not news, and anything that lands while the
+                // overlay is shut is exactly what the badge is for.
+                if !own && !chat.open.get_untracked() {
+                    chat.unread.update(|count| *count += 1);
+                }
+                chat.messages.update(|list| {
                     list.push(UiChatMsg {
                         sender_name: sender_name.unwrap_or_else(|| "Anonymous".to_string()),
                         time: format_time(timestamp_ms),

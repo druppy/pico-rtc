@@ -22,7 +22,9 @@ use webrtc_room::server::{AppState, build_router, chat::InMemoryChat};
 ///   exclusively SSE at `/api/room/:id/events`.
 ///
 /// The CSS link below assumes `hash-files = false` (the default). Enabling
-/// hashing would suffix that file name with its content hash.
+/// hashing would suffix that file name with its content hash. It is also the
+/// only stylesheet the page loads: PicoCSS is vendored under `style/pico/` and
+/// compiled into that one file, so the room makes no third-party request.
 fn shell(options: LeptosOptions) -> impl IntoView {
     let css = format!("/{}/{}.css", options.site_pkg_dir, options.output_name);
 
@@ -33,10 +35,6 @@ fn shell(options: LeptosOptions) -> impl IntoView {
                 <meta charset="utf-8"/>
                 <meta name="viewport" content="width=device-width, initial-scale=1"/>
                 <title>Pico RTC Room</title>
-                <link
-                    rel="stylesheet"
-                    href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css"
-                />
                 <link rel="stylesheet" href=css/>
                 <AutoReload options=options.clone()/>
                 <HydrationScripts options/>

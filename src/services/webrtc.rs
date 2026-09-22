@@ -32,6 +32,7 @@ use web_sys::{
     RtcSignalingState, RtcTrackEvent, console,
 };
 
+use crate::services::audio_level::LevelMeter;
 use crate::services::signaling::send_signal;
 use crate::types::{SignalMessage, SseEvent};
 
@@ -156,6 +157,10 @@ pub struct Mesh {
     local: Option<MediaStream>,
     local_attached: bool,
     peers: HashMap<String, PeerHandle>,
+    /// Shared with every `ontrack` handler, which is where a peer's stream first
+    /// becomes visible. `None` only where `AudioContext` is unavailable, in which
+    /// case the stage simply has no owner.
+    meter: Option<Rc<RefCell<LevelMeter>>>,
 }
 
 impl Mesh {
@@ -170,6 +175,7 @@ impl Mesh {
             local,
             local_attached: false,
             peers: HashMap::new(),
+            meter: LevelMeter::new().map(|meter| Rc::new(RefCell::new(meter))),
         }
     }
 
@@ -282,6 +288,7 @@ impl Mesh {
 
         let on_track = {
             let remote = Rc::clone(&remote);
+            let meter = self.meter.clone();
             let tile = peer.to_string();
             Closure::wrap(Box::new(move |ev: RtcTrackEvent| {
                 // The sender's tracks travel together in its first stream.
@@ -289,6 +296,11 @@ impl Mesh {
                     return;
                 };
                 *remote.borrow_mut() = Some(stream.clone());
+                // Start measuring this peer as soon as there is audio to measure,
+                // whether or not the tile is in the DOM yet.
+                if let Some(meter) = &meter {
+                    meter.borrow_mut().watch(&tile, &stream);
+                }
                 if let Some(video) = video_element(&tile) {
                     attach_stream(&video, Some(&stream));
                 }
@@ -513,6 +525,11 @@ impl Mesh {
         let Some(handle) = self.peers.remove(peer) else {
             return;
         };
+        // Stop listening for their volume, and clear any claim they had on the
+        // stage, before the connection that fed it goes away.
+        if let Some(meter) = &self.meter {
+            meter.borrow_mut().forget(peer);
+        }
         // Detach the handlers, then close the PC; the closures are freed when this
         // scope ends, by which point JS can no longer reach them.
         handle.pc.set_onicecandidate(None);
@@ -524,6 +541,16 @@ impl Mesh {
         if let Some(video) = video_element(peer) {
             attach_stream(&video, None);
         }
+    }
+
+    /// The peer to show large right now, or `None` when nobody is speaking.
+    ///
+    /// Polled rather than pushed: levels are only interesting as they cross each
+    /// other, and the mesh deliberately holds no reactive state.
+    pub fn dominant_speaker(&mut self) -> Option<String> {
+        self.meter
+            .as_ref()
+            .and_then(|meter| meter.borrow_mut().sample())
     }
 
     /// Hands every stream we hold to the `<video>` element whose id names its

@@ -12,7 +12,10 @@ RUN cargo install cargo-leptos \
 WORKDIR /build
 COPY . .
 
-# Builds the wasm client and the server binary; static output lands in target/site
+# Builds the wasm client and the server binary; static output lands in target/site.
+# Compiling style/main.scss needs Dart Sass: cargo-leptos takes it from PATH if present
+# and otherwise downloads a pinned release, so an air-gapped builder should install
+# `sass` in this stage rather than rely on the fetch.
 RUN cargo leptos build --release
 
 # Runtime stage

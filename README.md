@@ -263,7 +263,7 @@ pico-rtc/
 │   ├── pages/
 │   │   ├── mod.rs
 │   │   ├── home.rs         # Landing: enter room name
-│   │   └── room.rs         # Video call UI
+│   │   └── room.rs         # Stage, controls, chat overlay, join flow
 │   ├── server/
 │   │   ├── mod.rs          # Router assembly + join/SSE/signal/chat handlers
 │   │   ├── rooms.rs        # Room state, participant tracking
@@ -273,17 +273,66 @@ pico-rtc/
 │   ├── services/
 │   │   ├── mod.rs
 │   │   ├── signaling.rs    # Client: SSE consumer + signal sender
-│   │   └── webrtc.rs       # Client: RTCPeerConnection mesh (one PC per peer)
+│   │   ├── webrtc.rs       # Client: RTCPeerConnection mesh (one PC per peer)
+│   │   └── audio_level.rs  # Client: per-peer loudness -> dominant speaker
 │   └── components/
 │       ├── mod.rs
-│       ├── video_tile.rs   # Single <video> element
-│       └── controls.rs     # Mute/screen-share buttons
+│       ├── video_tile.rs   # One <video>, its caption, and whether it holds the stage
+│       └── controls.rs     # Media toggles, stage mode, chat toggle and badge
 └── style/
-    └── main.css            # Minimal custom styles on top of PicoCSS
-
-Build output (gitignored): target/site/{index.html,pkg/*} for the site, and
-target/front/ for the separate wasm target dir cargo-leptos uses.
+    ├── main.scss           # Stylesheet entry: Pico, then the app's own rules
+    └── pico/               # PicoCSS 2.x Sass sources, vendored (do not hand-edit)
 ```
+
+Build output (gitignored): `target/site/{index.html,pkg/*}` for the site, and
+`target/front/` for the separate wasm target dir cargo-leptos uses.
+
+### Styling
+
+PicoCSS 2.x is **vendored** under `style/pico/` — the Sass sources, not the compiled
+css. `style/main.scss` loads it and then adds the app's rules, and cargo-leptos
+compiles that one file into `target/site/pkg/webrtc-room.css` with Dart Sass before
+Lightning CSS retargets it. Nothing is fetched from a CDN, so the room works offline
+and the origin is the only host the page talks to.
+
+Pico lives inside `style/` rather than beside it because cargo-leptos passes **no sass
+load paths** to `sass` — partials only resolve relative to the entry file.
+
+Two consequences worth knowing:
+
+- `sass` comes from `PATH` if there is one; otherwise cargo-leptos downloads a pinned
+  Dart Sass on first build. Anything from 1.8x up works — Pico's helpers need
+  `color.channel()` and `map.deep-merge()`.
+- Pico's knobs are plain Sass variables (`$theme-color`, `$enable-*`) in
+  `style/pico/_settings.scss`; the `--pico-*` names are the CSS custom properties it
+  *emits*. The app's rules use those properties, so the accent colour and dark mode
+  still drive everything. Pico only emits ~20 `!important` declarations (form
+  validation and reduced-motion), so ordinary specificity is enough to override it.
+
+## Room UI
+
+The stage is a `1fr 4fr` grid: a narrow strip for your own mirrored feed, four fifths
+for the room. Which remote feed owns that space is decided client-side:
+
+- **Speaker mode** (default) shows one remote feed — the loudest, measured from an
+  `AnalyserNode` tapped on the same `MediaStream` the `<video>` already plays, so no
+  audio is duplicated. A challenger has to be 1.6x louder to take the stage, and a
+  quiet room falls back to a stable pick rather than an empty tile.
+- **Gallery mode** shows every feed at equal size.
+- **Under 640px** it is always a gallery, and the mode toggle is hidden: a phone held
+  next to a face has neither width for the split nor patience for a 20% tile.
+
+Chat is a fixed overlay rather than a column, so it costs the feeds no width. Closed,
+it takes no space and holds no focus, and its toggle carries a badge counting whatever
+arrived while it was shut; opening the overlay is what clears the count.
+
+The three media toggles are the one part of the bar that does nothing yet: they flip
+their own pressed state, not the tracks behind them (see the roadmap).
+
+One dev caveat: browsers park an `AudioContext` until the page has had a user gesture,
+and a parked context reads as silence. Until something is clicked, speaker mode keeps
+its fallback pick. `--autoplay-policy=no-user-gesture-required` removes the wait when
+you are driving the page from a script.
 
 ## API Reference
 
@@ -303,8 +352,8 @@ Join (or claim) a room.
 }
 
 // Response
-{"status": "ok", "self_id": "...", "peers": ["..."] , "chat": [...]}
-{"status": "need-password"}        // room is new, you must set one
+{"status": "ok", "self_id": "...", "peers": ["..."], "chat": [...]}
+{"status": "need-password"}       // room is new, you must set one
 {"status": "password-required"}   // wrong password
 {"status": "full"}                // room at capacity
 ```
@@ -382,6 +431,9 @@ instead of taking another one from the room's capacity.
       only replaced if it re-joins with the same `session_id`, so tabs that are
       closed leave ghost tiles behind until the room is restarted
 - [ ] Data channels (collaborative drawing, reactions)
+- [ ] Wire the mic/camera/screen toggles to the peer connections — they flip their own
+      state and their `aria-pressed`, but nothing downstream, so the room still hears
+      and sees you. Real toggling means `track.enabled` plus a renegotiation per peer
 - [ ] JWT/OIDC auth replacing room passwords
 - [ ] Recording (server-side or client-side MediaRecorder)
 - [ ] Chat sidebar (over existing DataChannel)
