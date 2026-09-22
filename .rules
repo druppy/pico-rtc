@@ -69,7 +69,9 @@
 - Single binary deploys: server binary + static files in `target/site/`
 - coturn: separate process (not embedded)
 - Reverse proxy: Caddy or Nginx for TLS (required — WebRTC mandates secure context)
-- Docker: single-stage Dockerfile for server, coturn via `network_mode: host`
+- Docker: multi-stage Dockerfile for the server (`rust:…-slim` builder → `debian:bookworm-slim` runtime), coturn via `network_mode: host`
+- Build tools (`cargo-leptos`, `wasm-bindgen-cli`, Dart Sass) are pinned in `scripts/ci-tools.sh` — the single source of truth, used by both CI and the Dockerfile. They are downloaded as prebuilt release binaries (musl statics for the two Rust tools), never `cargo install`-ed: unpinned resolution pulls a dependency tree whose MSRV outruns our toolchain, and it compiles ~300 crates nothing else needs
+- `rust-toolchain.toml` is `channel = "stable"`, so the compiler moves with no commit attached to it; the Dockerfile's `rust:1.90-slim` is a bootstrap floor, not a pin. Pin the channel if reproducible builds ever start to matter
 
 ## File Naming
 - Snake_case for modules (`room.rs`, `webrtc.rs`)
@@ -80,6 +82,20 @@
 - `#[cfg(test)]` for unit tests
 - Integration tests hit real Axum server via `axum::test` helpers
 - WebRTC logic: testable as pure Rust where possible (state machines, signaling message routing)
+- Rust tests run in CI under `cargo nextest --profile ci` (`.config/nextest.toml`); `cargo test` cannot emit JUnit on stable because its JSON output is behind `-Z unstable-options`
+- JS suites run on Node's built-in test runner (`node --test`) with two reporters at once — spec to stdout, JUnit to a file. Deliberately no npm project and no `package.json`
+- Test titles stay constant across runs: per-run values (room names, ports, timestamps) end up in the JUnit `classname` and destroy per-test history in GitHub's checks. Log such values instead
+
+## CI & GitHub Actions
+- Runner is pinned to an explicit Ubuntu (`ubuntu-24.04`), never `ubuntu-latest` — that label is a moving target (it becomes Ubuntu 26.04 between 2026-10-19 and 2026-11-19). Move the pin on a branch, watch it go green, then land it
+- `runs-on` may not use the `env` context (actionlint enforces this; available are `github`, `inputs`, `matrix`, `needs`, `strategy`, `vars`). `vars` would work but the runner OS does not belong in repository settings, where a fork receives an empty string and every job fails — keep the four literals
+- Every suite publishes JUnit. `check_name` must be unique per job, because jobs on different runners overwrite each other's history; publishing requires `permissions.checks: write`; nextest writes `target/nextest/ci/junit.xml` regardless of `CARGO_TARGET_DIR` (its issue #883)
+- CI tooling that is fetched rather than depended upon (`cargo-nextest`, and locally `actionlint`/`shellcheck`) never enters `Cargo.toml`
+- Only `ci.yml` exists; there is no lint job. `actionlint`, `shellcheck` and `node --check` are run by hand before pushing a workflow or shell change — they are not gates, so a broken workflow reaches `main` if nobody remembers to run them
+- The browser suite is advisory (`continue-on-error`): the job can be green while its check is red, so read the JUnit check rather than trusting the job tick
+- A CI change is verified by a run, not by a linter. `actionlint` validates expressions and context availability, but only a runner proves an action version or a runner label
+- Comments that state CI cost must match measured timing. `Build image` is ~3 min across runs precisely because the build tools are downloaded rather than compiled — an older comment claimed the opposite and misled the reader into distrusting a green run
+- Watching CI over REST: `/actions/runs/{n}/jobs` takes the `run_id`, not the `run_number` (the latter returns 404, not an empty list); job **logs** are 403 without admin, so infer from step conclusions and timestamps; the `JUnit — …` entries returned by the jobs endpoint are check runs, not jobs (`labels` empty, `steps: 0`)
 
 ## Security
 - TURN credentials: ephemeral (HMAC-SHA1 with TTL per TURN REST API spec — this is a protocol constraint, not a weakness; HMAC security is independent of hash collision resistance)
