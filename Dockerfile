@@ -1,21 +1,38 @@
-# Build stage
-# rust-toolchain.toml pins `channel = "stable"` — keep this tag in sync with it.
+# Build stage.
+#
+# rust-toolchain.toml is the real pin (`channel = "stable"` plus the wasm32
+# target); this image only has to be new enough to bootstrap rustup, which then
+# installs the toolchain that file names. The tag below is a floor, not the
+# version that compiles the project.
 FROM rust:1.90-slim AS builder
-RUN rustup target add wasm32-unknown-unknown
 
-# cargo-leptos drives the wasm build, and needs a wasm-bindgen-cli whose version
-# matches the `wasm-bindgen` crate pinned in Cargo.toml. Keep these in sync:
-# a schema mismatch fails the front-end build outright.
-RUN cargo install cargo-leptos \
- && cargo install -f --locked wasm-bindgen-cli --version 0.2.128
+# Needed to fetch the pinned build tools below; the slim base ships neither.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends curl ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
-COPY . .
+
+# Copied before the source so the toolchain download is its own cached layer:
+# re-fetched when the pin changes, not on every source edit. Installing the
+# channel also pulls the targets the file declares (wasm32-unknown-unknown).
+COPY rust-toolchain.toml .
+RUN rustc --version && rustup target list --installed
+
+# cargo-leptos drives the wasm build, wasm-bindgen-cli must match the
+# `=`-pinned wasm-bindgen crate, and Dart Sass compiles style/main.scss. All
+# three come from scripts/ci-tools.sh, the same script CI uses, so the versions
+# live in exactly one place.
+#
+# `cargo install cargo-leptos` is deliberately not used: unpinned it resolves
+# the newest 0.3.x, whose dependency tree now requires a newer rustc than this
+# image bootstraps, so the build fails before it starts. Even pinned, it
+# compiles ~300 crates here that nothing else needs.
+COPY scripts/ci-tools.sh scripts/ci-tools.sh
+RUN sh scripts/ci-tools.sh /usr/local/bin
 
 # Builds the wasm client and the server binary; static output lands in target/site.
-# Compiling style/main.scss needs Dart Sass: cargo-leptos takes it from PATH if present
-# and otherwise downloads a pinned release, so an air-gapped builder should install
-# `sass` in this stage rather than rely on the fetch.
+COPY . .
 RUN cargo leptos build --release
 
 # Runtime stage
@@ -32,5 +49,4 @@ ENV LEPTOS_SITE_ROOT=/srv/site \
     LEPTOS_SITE_ADDR=0.0.0.0:3000 \
     LEPTOS_OUTPUT_NAME=webrtc-room
 EXPOSE 3000
-
 CMD ["webrtc-room"]

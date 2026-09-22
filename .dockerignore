@@ -1,0 +1,9 @@
+# The Dockerfile does `COPY . .` then builds inside the image, so anything
+# heavy here is uploaded into the build context for nothing — and target/ is
+# gigabytes. The image compiles from source; it never consumes local output.
+/target
+/dist
+
+# Not inputs to the build.
+.git
+.github
