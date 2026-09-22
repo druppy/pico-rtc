@@ -1,0 +1,26 @@
+# cargo-nextest configuration.
+#
+# The only reason this file exists is JUnit output, so CI can publish per-test
+# results instead of a wall of log text. `cargo test` cannot do this on stable:
+# its JSON output sits behind `-Z unstable-options`, which the compiler refuses
+# on a stable toolchain ("the option `Z` is only accepted on the nightly
+# compiler"), and this project pins stable in rust-toolchain.toml.
+#
+# Run it with:
+#   cargo nextest run --features ssr --profile ci
+#
+# Local runs without --profile behave exactly like before, so nothing here is
+# forced on a developer.
+[profile.ci]
+# Fail fast is wrong for CI: a broken gate should still tell us about every
+# other test, not stop at the first one.
+fail-fast = false
+
+[profile.ci.junit]
+# Written under target/nextest/ci/ (issue #883: CARGO_TARGET_DIR is not
+# honoured for this path), which CI collects alongside the JS reports.
+path = "junit.xml"
+
+# A failing test is useless without the assertions that produced it.
+store-success-output = false
+store-failure-output = true

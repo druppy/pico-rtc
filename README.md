@@ -257,13 +257,17 @@ pico-rtc/
 ├── docker-compose.yml
 ├── .github/
 │   └── workflows/
-│       └── ci.yml          # clippy + tests + build + smoke, four jobs
+│       └── ci.yml          # clippy + tests + build + docker, four jobs
+├── .config/
+│   └── nextest.toml        # The `ci` profile that makes nextest emit JUnit
 ├── scripts/
 │   ├── ci-tools.sh         # Installs pinned cargo-leptos / wasm-bindgen / Dart Sass
 │   ├── check-bundle.sh     # Asserts the artifact: Pico in, WebSocket out
-│   ├── api-smoke.sh        # HTTP-level assertions against a running server
-│   ├── ui-smoke.sh         # Starts headless Chromium with fake media devices
-│   └── ui-smoke.mjs        # The browser checks it then drives over CDP
+│   ├── api.test.mjs        # HTTP-level assertions against a running server
+│   ├── ui.test.mjs         # The browser assertions, driven over CDP
+│   ├── ui-smoke.sh         # Launcher: headless Chromium with fake media devices
+│   └── lib/
+│       └── browser.mjs     # Minimal CDP client (tabs, input, room state)
 ├── src/
 │   ├── lib.rs              # Module gates + the wasm `hydrate()` entry point
 │   ├── types.rs            # Shared request/response/event types (both targets)
@@ -353,23 +357,24 @@ increasing order of how much of the system they touch:
 | -------- | ------------------------------------------------------------------------------- |
 | `server` | Native clippy with `-D warnings`, plus the unit tests (auth, rooms, addressing) |
 | `client` | Clippy for the wasm half, which only compiles for `wasm32`                      |
-| `build`  | `cargo leptos build`, assertions on the artifact, then the API smoke            |
-| `docker` | Builds the image and runs the same API smoke against the container              |
+| `build`  | `cargo leptos build`, assertions on the artifact, then the API + browser suites |
+| `docker` | Builds the image and runs the same API suite against the container              |
 
 `docker` is the slow one — it builds `--release` from scratch with a cold layer
 cache. Everything else is fast enough to keep green.
 
-Each check is written to run on a workstation too, which is how they were
-developed:
+### Running them here
 
 ```bash
-sh scripts/ci-tools.sh                      # pinned cargo-leptos, wasm-bindgen, Dart Sass
+sh scripts/ci-tools.sh                          # pinned cargo-leptos, wasm-bindgen, Dart Sass
 cargo leptos build && sh scripts/check-bundle.sh
-cargo test --features ssr
 
-target/debug/webrtc-room &                  # writes target/site/index.html on startup
-sh scripts/api-smoke.sh                     # real handlers over HTTP
-sh scripts/ui-smoke.sh 3                    # headless Chromium, three peers, fake cameras
+cargo test --features ssr                       # as always
+cargo nextest run --features ssr --profile ci   # same tests, plus target/nextest/ci/junit.xml
+
+target/debug/webrtc-room &                      # writes target/site/index.html on startup
+node --test scripts/api.test.mjs                # real handlers over HTTP
+sh scripts/ui-smoke.sh 3                        # headless Chromium, three peers, fake cameras
 ```
 
 `check-bundle.sh` is where the SSE-only rule gets enforced mechanically: it fails
@@ -378,15 +383,48 @@ and also if `EventSource` is *missing* from it. It matches on the scheme rather
 than a bare `ws:` because that substring occurs inside ordinary words such as
 `rows:`.
 
+### JUnit reports
+
+Every suite emits JUnit XML, and CI publishes it as check runs, so a failure is
+one named red test rather than a paragraph of log text to squint at.
+
+| Suite           | Runner                             | Report                        |
+| --------------- | ---------------------------------- | ----------------------------- |
+| Rust unit tests | `cargo nextest --profile ci`       | `target/nextest/ci/junit.xml` |
+| HTTP/API        | `node --test`, built-in reporter   | `reports/api-junit.xml`       |
+| Browser         | `node --test`, started by the shim | `reports/ui-junit.xml`        |
+
+Two constraints explain the shape of this:
+
+- **`cargo test` cannot do this on stable.** Its machine-readable output needs
+  `-Z unstable-options`, which the compiler refuses on a stable toolchain, and
+  this project pins stable. `cargo-nextest` emits JUnit natively and is a test
+  runner rather than a dependency: `Cargo.toml` is untouched and `cargo test`
+  still works for anyone who does not want the extra binary.
+- **The JS suites use `node:test`.** Node ships a runner *and* a JUnit reporter,
+  so the repository still has no `package.json` and no `node_modules`, and the
+  browser is driven over raw CDP (`scripts/lib/browser.mjs`) instead of
+  Puppeteer — which would have meant downloading a browser in order to test one.
+
+Test *titles* deliberately contain no per-run values (room name, base URL): the
+room is logged instead. JUnit consumers key a test's history on its name, so a
+per-run value in a title gives every CI run a brand-new test with nothing to
+compare against.
+
+Playwright is the sensible upgrade the day these suites want real auto-waiting,
+traces, or screenshots on failure. It costs an npm project and a browser
+download per runner, which is exactly the weight this arrangement avoids.
+
 Two deliberate omissions, so nobody has to rediscover them:
 
 - **No `cargo fmt --check` gate.** The tree has pre-existing formatting drift, so
   the gate would fail for reasons unrelated to the change under review. Run
   `cargo fmt` once to sweep, then it is one step to add.
-- **The browser smoke is advisory** (`continue-on-error: true`). WebRTC with fake
+- **The browser suite is advisory** (`continue-on-error: true`). WebRTC with fake
   devices can flake on shared runners, and a red X that means "sometimes" trains
   people to ignore red Xes. It passes reliably on a workstation; delete that line
-  to make it voting once it has held on real runners.
+  to make it voting once it has held on real runners. Its JUnit report is
+  published either way, which is how you can watch it before promoting it.
 
 ## API Reference
 

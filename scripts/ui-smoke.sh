@@ -1,6 +1,6 @@
 #!/bin/sh
-# Launches headless Chromium with fake media devices, runs scripts/ui-smoke.mjs
-# against it, and shuts the browser down again.
+# Launches headless Chromium with fake media devices, runs the browser suite
+# (scripts/ui.test.mjs) against it, and shuts the browser down again.
 #
 #   scripts/ui-smoke.sh [peers]              # default 3
 #
@@ -8,9 +8,13 @@
 #   BROWSER    which browser binary to use    (default: first one found)
 #   PEERS      number of tabs                 (default 3)
 #
-# The fake-device flags are what make this possible at all: without them the
+# The fake-device flags are what makes this possible at all: without them the
 # page asks for camera permission, gets no frames, and every media assertion
 # fails. --no-sandbox is for containers, where the sandbox cannot unshare.
+#
+# Two reporters at once: `spec` for whoever is watching, JUnit into reports/ for
+# CI to publish. Node's test runner does this natively, which is why there is no
+# npm project in this repository.
 
 set -eu
 
@@ -69,6 +73,10 @@ until curl -sf "$CDP_URL/json/version" >/dev/null 2>&1; do
 done
 
 status=0
-BASE_URL="$BASE_URL" CDP_URL="$CDP_URL" node scripts/ui-smoke.mjs "$PEERS" || status=$?
+mkdir -p reports
+BASE_URL="$BASE_URL" CDP_URL="$CDP_URL" PEERS="$PEERS" node --test \
+    --test-reporter=spec --test-reporter-destination=stdout \
+    --test-reporter=junit --test-reporter-destination=reports/ui-junit.xml \
+    scripts/ui.test.mjs || status=$?
 cleanup
 exit "$status"

@@ -2,6 +2,9 @@
 /target
 /dist
 
+# Test reports (JUnit XML from nextest and node --test)
+/reports
+
 # Editor / OS
 .DS_Store
 *.swp

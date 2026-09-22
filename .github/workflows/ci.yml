@@ -1,14 +1,19 @@
 name: CI
 
-# Three jobs, split by what they can prove without the other halves:
+# Four jobs, split by what they can prove without the other halves:
 #   server  native clippy + unit tests (the room/signaling/chat state machine)
 #   client  wasm clippy (the Leptos half — it only compiles for wasm32)
-#   build   the real cargo-leptos build, then assertions on the artifact, an
-#           API smoke against the running server, and a browser smoke
+#   build   the real cargo-leptos build, then assertions on the artifact, the
+#           API suite against the running server, and the browser suite
 #
 # `cargo fmt --check` is deliberately not a gate: the tree has pre-existing
 # formatting drift, so it would fail for reasons unrelated to a change. Run it
 # locally when you want to sweep, or turn it on once the tree is clean.
+#
+# Every job that runs tests publishes JUnit XML, so a failure shows up as a
+# named check run per test rather than as log text to scroll through. The Rust
+# side needs cargo-nextest (`cargo test` cannot emit this on stable: its JSON
+# output is behind `-Z unstable-options`); the JS side is Node's own reporter.
 
 on:
   push:
@@ -18,6 +23,8 @@ on:
 
 permissions:
   contents: read
+  # The JUnit publisher creates check runs for the commit.
+  checks: write
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -49,8 +56,26 @@ jobs:
       - name: Clippy (ssr, no warnings)
         run: cargo clippy --no-default-features --features=ssr --all-targets -- -D warnings
 
+      # nextest from its own release binary, on a pinned minor stream. It is a
+      # CI/test runner, not a dependency of the crate — Cargo.toml is untouched.
+      - name: Install cargo-nextest
+        run: |
+          mkdir -p "$HOME/.cargo/bin"
+          curl -sSLf https://get.nexte.st/0.9/linux | tar xz -C "$HOME/.cargo/bin"
+          cargo nextest --version
+
+      # --profile ci is what produces JUnit (see .config/nextest.toml). It also
+      # turns off fail-fast, so one broken test does not hide the others.
       - name: Tests
-        run: cargo test --features ssr
+        run: cargo nextest run --features ssr --profile ci
+
+      - name: Publish JUnit results
+        if: ${{ !cancelled() && hashFiles('target/nextest/ci/junit.xml') != '' }}
+        uses: mikepenz/action-junit-report@v6
+        with:
+          # nextest ignores CARGO_TARGET_DIR for this path (its issue #883).
+          report_paths: target/nextest/ci/junit.xml
+          check_name: JUnit — server unit tests
 
   # ── Client: wasm half ───────────────────────────────────────────────────────
   client:
@@ -138,16 +163,32 @@ jobs:
 
       # Deterministic, no browser: join/claim, wrong password, addressed relay,
       # SSE resync + peer-joined + chat broadcast, reconnect gap healing.
-      - name: API smoke
-        run: sh scripts/api-smoke.sh
+      - name: API tests
+        run: |
+          mkdir -p reports
+          node --test \
+            --test-reporter=spec --test-reporter-destination=stdout \
+            --test-reporter=junit --test-reporter-destination=reports/api-junit.xml \
+            scripts/api.test.mjs
 
       # Advisory. Two reasons: WebRTC with fake devices can flake, and GitHub's
       # runners have no guaranteed camera/scheduler, so a red X here would
       # teach people to ignore red Xes. To promote it to voting, delete the
       # `continue-on-error` line below — it passes reliably on a workstation.
-      - name: Browser smoke (advisory)
+      - name: Browser tests (advisory)
         continue-on-error: true
         run: sh scripts/ui-smoke.sh 3
+
+      # Both suites from this job in one check; the two files have distinct
+      # classnames, so the per-test rows stay distinguishable. `check_name`
+      # differs per job because these run on separate runners and identical
+      # check names would overwrite each other's history.
+      - name: Publish JUnit results
+        if: ${{ !cancelled() && hashFiles('reports/*.xml') != '' }}
+        uses: mikepenz/action-junit-report@v6
+        with:
+          report_paths: reports/*.xml
+          check_name: JUnit — build API + browser tests
 
       - name: Server log
         if: failure()
@@ -158,7 +199,7 @@ jobs:
         run: kill "$(cat /tmp/server.pid)" 2>/dev/null || true
 
   # ── The deploy artifact ─────────────────────────────────────────────────
-  # Builds the real Dockerfile and runs the same API smoke against the
+  # Builds the real Dockerfile and runs the same API suite against the
   # container. Nothing else here exercises the runtime wiring (LEPTOS_SITE_ROOT,
   # the 0.0.0.0 bind, the static files baked into /srv/site), which is exactly
   # where a deploy tends to break.
@@ -192,8 +233,24 @@ jobs:
           docker logs pico-rtc-ci
           exit 1
 
-      - name: API smoke against the image
-        run: sh scripts/api-smoke.sh
+      # Deterministic, no browser: the same suite as in the build job, but
+      # against the container, so the runtime wiring is what gets exercised.
+      - name: API tests against the image
+        run: |
+          mkdir -p reports
+          node --test \
+            --test-reporter=spec --test-reporter-destination=stdout \
+            --test-reporter=junit --test-reporter-destination=reports/api-junit.xml \
+            scripts/api.test.mjs
+
+      # Its own check name: this job runs on a different runner from the build
+      # job, and two jobs publishing under one name overwrite each other.
+      - name: Publish JUnit results
+        if: ${{ !cancelled() && hashFiles('reports/api-junit.xml') != '' }}
+        uses: mikepenz/action-junit-report@v6
+        with:
+          report_paths: reports/api-junit.xml
+          check_name: JUnit — docker API tests
 
       - name: Container log
         if: failure()
