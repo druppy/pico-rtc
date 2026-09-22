@@ -26,6 +26,14 @@ impl InMemoryChat {
     }
 }
 
+impl Default for InMemoryChat {
+    /// The same empty map [`InMemoryChat::new`] builds — present because a `new()`
+    /// that takes no arguments is expected to be matched by `Default`.
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ChatStore for InMemoryChat {
     fn append(&self, msg: &ChatMessage) {
         let entry = self.rooms.entry(msg.room.clone()).or_default();

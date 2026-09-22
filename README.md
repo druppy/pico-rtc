@@ -253,7 +253,17 @@ pico-rtc/
 ├── turnserver.conf         # coturn config template
 ├── Caddyfile               # Reverse proxy template
 ├── Dockerfile
+├── .dockerignore           # Keeps target/ out of the build context
 ├── docker-compose.yml
+├── .github/
+│   └── workflows/
+│       └── ci.yml          # clippy + tests + build + smoke, four jobs
+├── scripts/
+│   ├── ci-tools.sh         # Installs pinned cargo-leptos / wasm-bindgen / Dart Sass
+│   ├── check-bundle.sh     # Asserts the artifact: Pico in, WebSocket out
+│   ├── api-smoke.sh        # HTTP-level assertions against a running server
+│   ├── ui-smoke.sh         # Starts headless Chromium with fake media devices
+│   └── ui-smoke.mjs        # The browser checks it then drives over CDP
 ├── src/
 │   ├── lib.rs              # Module gates + the wasm `hydrate()` entry point
 │   ├── types.rs            # Shared request/response/event types (both targets)
@@ -333,6 +343,50 @@ One dev caveat: browsers park an `AudioContext` until the page has had a user ge
 and a parked context reads as silence. Until something is clicked, speaker mode keeps
 its fallback pick. `--autoplay-policy=no-user-gesture-required` removes the wait when
 you are driving the page from a script.
+
+## Tests & CI
+
+`.github/workflows/ci.yml` runs on every push and pull request, as four jobs in
+increasing order of how much of the system they touch:
+
+| Job      | What it proves                                                                  |
+| -------- | ------------------------------------------------------------------------------- |
+| `server` | Native clippy with `-D warnings`, plus the unit tests (auth, rooms, addressing) |
+| `client` | Clippy for the wasm half, which only compiles for `wasm32`                      |
+| `build`  | `cargo leptos build`, assertions on the artifact, then the API smoke            |
+| `docker` | Builds the image and runs the same API smoke against the container              |
+
+`docker` is the slow one — it builds `--release` from scratch with a cold layer
+cache. Everything else is fast enough to keep green.
+
+Each check is written to run on a workstation too, which is how they were
+developed:
+
+```bash
+sh scripts/ci-tools.sh                      # pinned cargo-leptos, wasm-bindgen, Dart Sass
+cargo leptos build && sh scripts/check-bundle.sh
+cargo test --features ssr
+
+target/debug/webrtc-room &                  # writes target/site/index.html on startup
+sh scripts/api-smoke.sh                     # real handlers over HTTP
+sh scripts/ui-smoke.sh 3                    # headless Chromium, three peers, fake cameras
+```
+
+`check-bundle.sh` is where the SSE-only rule gets enforced mechanically: it fails
+if the built client mentions `WebSocket` or contains a `ws://`/`wss://` literal,
+and also if `EventSource` is *missing* from it. It matches on the scheme rather
+than a bare `ws:` because that substring occurs inside ordinary words such as
+`rows:`.
+
+Two deliberate omissions, so nobody has to rediscover them:
+
+- **No `cargo fmt --check` gate.** The tree has pre-existing formatting drift, so
+  the gate would fail for reasons unrelated to the change under review. Run
+  `cargo fmt` once to sweep, then it is one step to add.
+- **The browser smoke is advisory** (`continue-on-error: true`). WebRTC with fake
+  devices can flake on shared runners, and a red X that means "sometimes" trains
+  people to ignore red Xes. It passes reliably on a workstation; delete that line
+  to make it voting once it has held on real runners.
 
 ## API Reference
 

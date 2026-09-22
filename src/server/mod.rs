@@ -68,10 +68,8 @@ async fn handle_join(
     if !is_valid_room_name(&room_id) {
         return Err(StatusCode::BAD_REQUEST);
     }
-    if let Some(ref pw) = req.claim_password {
-        if pw.len() > 128 {
-            return Err(StatusCode::BAD_REQUEST);
-        }
+    if req.claim_password.as_ref().is_some_and(|pw| pw.len() > 128) {
+        return Err(StatusCode::BAD_REQUEST);
     }
 
     // Atomically claim-or-load the room (no TOCTOU between existence check and insert).

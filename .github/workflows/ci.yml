@@ -1,0 +1,204 @@
+name: CI
+
+# Three jobs, split by what they can prove without the other halves:
+#   server  native clippy + unit tests (the room/signaling/chat state machine)
+#   client  wasm clippy (the Leptos half — it only compiles for wasm32)
+#   build   the real cargo-leptos build, then assertions on the artifact, an
+#           API smoke against the running server, and a browser smoke
+#
+# `cargo fmt --check` is deliberately not a gate: the tree has pre-existing
+# formatting drift, so it would fail for reasons unrelated to a change. Run it
+# locally when you want to sweep, or turn it on once the tree is clean.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # The room name in the smoke tests is generated per run, so two pushes can
+  # hit the same server without colliding.
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ── Server: native half ─────────────────────────────────────────────────────
+  server:
+    name: Server — clippy + tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Add clippy
+        run: rustup component add clippy
+
+      # -D warnings: a warning is a failure, so lints cannot quietly pile up.
+      # --all-targets so the #[cfg(test)] code is linted too.
+      - name: Clippy (ssr, no warnings)
+        run: cargo clippy --no-default-features --features=ssr --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo test --features ssr
+
+  # ── Client: wasm half ───────────────────────────────────────────────────────
+  client:
+    name: Client — clippy (wasm32)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Add clippy + wasm target
+        run: |
+          rustup component add clippy
+          rustup target add wasm32-unknown-unknown
+
+      # The client half only compiles for wasm32, and only as the lib target:
+      # the bin is the native server.
+      - name: Clippy (csr, no warnings)
+        run: >
+          cargo clippy --target wasm32-unknown-unknown
+          --no-default-features --features=csr --lib -- -D warnings
+
+  # ── Build the real thing and poke it ────────────────────────────────────────
+  build:
+    name: Build + smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Add wasm target
+        run: rustup target add wasm32-unknown-unknown
+
+      # cargo-leptos, wasm-bindgen-cli and Dart Sass, at pinned versions, from
+      # their own release binaries. The pins live in the script so a developer
+      # can run the same thing.
+      - name: Install pinned build tools
+        run: |
+          sh scripts/ci-tools.sh "$HOME/.local/bin"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Record tool versions
+        run: |
+          cargo --version
+          rustc --version
+          cargo leptos --version || true
+
+      # Project rule: cargo-leptos owns the shell. If someone reintroduces
+      # Trunk or a hand-written index.html, the two systems fight over the
+      # HTML and the failure shows up much later as a stale page.
+      - name: Enforce the build model
+        run: |
+          test ! -e Trunk.toml || { echo "Trunk.toml is back — cargo-leptos owns the build"; exit 1; }
+          test ! -e index.html || { echo "index.html must not be committed; the server writes it at startup"; exit 1; }
+
+      - name: cargo leptos build
+        run: cargo leptos build
+
+      # CSS actually contains Pico, and the bundle contains no WebSocket.
+      - name: Check the bundle
+        run: sh scripts/check-bundle.sh
+
+      # The server writes <site-root>/index.html on startup, so it has to be
+      # running for anything to be served.
+      - name: Start server
+        run: |
+          TURN_SECRET=ci-only-turn-secret \
+            ./target/debug/webrtc-room > /tmp/server.log 2>&1 &
+          echo $! > /tmp/server.pid
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:3000/ > /dev/null; then
+              echo "server up after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "server did not come up"
+          cat /tmp/server.log
+          exit 1
+
+      # Deterministic, no browser: join/claim, wrong password, addressed relay,
+      # SSE resync + peer-joined + chat broadcast, reconnect gap healing.
+      - name: API smoke
+        run: sh scripts/api-smoke.sh
+
+      # Advisory. Two reasons: WebRTC with fake devices can flake, and GitHub's
+      # runners have no guaranteed camera/scheduler, so a red X here would
+      # teach people to ignore red Xes. To promote it to voting, delete the
+      # `continue-on-error` line below — it passes reliably on a workstation.
+      - name: Browser smoke (advisory)
+        continue-on-error: true
+        run: sh scripts/ui-smoke.sh 3
+
+      - name: Server log
+        if: failure()
+        run: cat /tmp/server.log || true
+
+      - name: Stop server
+        if: always()
+        run: kill "$(cat /tmp/server.pid)" 2>/dev/null || true
+
+  # ── The deploy artifact ─────────────────────────────────────────────────
+  # Builds the real Dockerfile and runs the same API smoke against the
+  # container. Nothing else here exercises the runtime wiring (LEPTOS_SITE_ROOT,
+  # the 0.0.0.0 bind, the static files baked into /srv/site), which is exactly
+  # where a deploy tends to break.
+  #
+  # This is the slow job: the image compiles cargo-leptos and wasm-bindgen-cli
+  # from source, then builds --release, with a cold layer cache on every run.
+  # To keep it off pull requests, add under `docker:` a `paths:` filter for
+  # Dockerfile/docker-compose.yml, or gate it with `if: github.event_name != 'pull_request'`.
+  docker:
+    name: Docker image runs
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t pico-rtc:ci .
+
+      - name: Start container
+        run: |
+          docker run -d --name pico-rtc-ci -p 3000:3000 \
+            -e TURN_SECRET=ci-only-turn-secret pico-rtc:ci
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:3000/ > /dev/null; then
+              echo "container up after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "container did not come up"
+          docker logs pico-rtc-ci
+          exit 1
+
+      - name: API smoke against the image
+        run: sh scripts/api-smoke.sh
+
+      - name: Container log
+        if: failure()
+        run: docker logs pico-rtc-ci || true
+
+      - name: Remove container
+        if: always()
+        run: docker rm -f pico-rtc-ci || true
