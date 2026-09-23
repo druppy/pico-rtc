@@ -92,20 +92,11 @@ impl Drop for SseStream {
 
 /// POST /api/room/:id/join
 pub async fn join_room(room_id: &str, req: JoinRequest) -> Result<JoinResponse, String> {
-    let url = format!("/api/room/{room_id}/join");
-    let resp = Request::post(&url)
-        .header("Content-Type", "application/json")
-        .json(&req)
-        .map_err(|e| e.to_string())?
-        .send()
+    post_json(&format!("/api/room/{room_id}/join"), &req)
+        .await?
+        .json::<JoinResponse>()
         .await
-        .map_err(|e| e.to_string())?;
-
-    if !resp.ok() {
-        return Err(format!("HTTP {}", resp.status()));
-    }
-
-    resp.json::<JoinResponse>().await.map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())
 }
 
 /// POST /api/room/:id/signal?session_id=...
@@ -114,43 +105,46 @@ pub async fn send_signal(
     session_id: &str,
     signal: &crate::types::SignalMessage,
 ) -> Result<(), String> {
-    let url = format!("/api/room/{room_id}/signal?session_id={session_id}");
-    let resp = Request::post(&url)
-        .header("Content-Type", "application/json")
-        .json(signal)
-        .map_err(|e| e.to_string())?
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-
-    if !resp.ok() {
-        return Err(format!("signal send failed: HTTP {}", resp.status()));
-    }
+    post_json(
+        &format!("/api/room/{room_id}/signal?session_id={session_id}"),
+        signal,
+    )
+    .await?;
     Ok(())
 }
 
-/// POST /api/room/:id/chat?session_id=... — send a chat message
+/// POST /api/room/:id/chat?session_id=...
 pub async fn send_chat(
     room_id: &str,
     session_id: &str,
     text: &str,
     sender_name: Option<&str>,
 ) -> Result<(), String> {
-    let url = format!("/api/room/{room_id}/chat?session_id={session_id}");
-    let body = serde_json::json!({
-        "text": text,
-        "sender_name": sender_name,
-    });
-    let resp = gloo_net::http::Request::post(&url)
+    let body = crate::types::ChatSendRequest {
+        text: text.to_string(),
+        sender_name: sender_name.map(str::to_string),
+    };
+    post_json(
+        &format!("/api/room/{room_id}/chat?session_id={session_id}"),
+        &body,
+    )
+    .await?;
+    Ok(())
+}
+
+async fn post_json<T: serde::Serialize>(
+    url: &str,
+    body: &T,
+) -> Result<gloo_net::http::Response, String> {
+    let resp = Request::post(url)
         .header("Content-Type", "application/json")
-        .json(&body)
+        .json(body)
         .map_err(|e| e.to_string())?
         .send()
         .await
         .map_err(|e| e.to_string())?;
-
     if !resp.ok() {
-        return Err(format!("chat send failed: HTTP {}", resp.status()));
+        return Err(format!("HTTP {}", resp.status()));
     }
-    Ok(())
+    Ok(resp)
 }

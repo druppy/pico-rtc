@@ -1,5 +1,5 @@
-pub mod video_tile;
 pub mod controls;
+pub mod video_tile;
 
-pub use video_tile::VideoTile;
 pub use controls::Controls;
+pub use video_tile::VideoTile;

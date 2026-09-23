@@ -10,7 +10,7 @@ use crate::pages::home::{get_cookie, set_cookie};
 use crate::services::session_id;
 use crate::services::signaling::{RoomStatus, SseStream, join_room, send_chat};
 use crate::services::webrtc::{Mesh, get_local_media};
-use crate::types::{ChatMessage, JoinRequest, JoinResponse, PeerInfo, SseEvent};
+use crate::types::{JoinRequest, JoinResponse, PeerInfo, SseEvent};
 
 /// A chat message as displayed in the UI
 #[derive(Debug, Clone, PartialEq)]
@@ -199,8 +199,6 @@ pub fn RoomPage() -> impl IntoView {
                 }
                 Ok(JoinResponse::Full {}) => status.set(RoomStatus::Full),
                 Ok(JoinResponse::Ok { self_id: id, .. }) => {
-                    // Peers and chat history are not read from the join response:
-                    // the stream's opening `resync` carries both, with names.
                     self_id.set(Some(id.clone()));
                     status.set(RoomStatus::Connected);
                     let handler = sse_handler(
@@ -210,7 +208,6 @@ pub fn RoomPage() -> impl IntoView {
                             open: chat_open,
                             unread,
                         },
-                        status,
                         self_id,
                         mesh,
                         early,
@@ -565,7 +562,6 @@ pub fn RoomPage() -> impl IntoView {
 fn sse_handler(
     peers: RwSignal<Vec<PeerInfo>>,
     chat: ChatUi,
-    status: RwSignal<RoomStatus>,
     self_id: RwSignal<Option<String>>,
     mesh: LocalStore<Option<Mesh>>,
     early: StoredValue<Vec<SseEvent>>,
@@ -575,12 +571,8 @@ fn sse_handler(
         // events concern it, and it has to see them even where the UI has nothing
         // to do (an offer for a peer whose tile is already rendered).
         match &ev {
-            SseEvent::Resync { .. }
-            | SseEvent::PeerJoined { .. }
-            | SseEvent::PeerLeft { .. }
-            | SseEvent::Offer { .. }
-            | SseEvent::Answer { .. }
-            | SseEvent::IceCandidate { .. } => {
+            SseEvent::ChatMessage { .. } => {}
+            _ => {
                 if mesh.with_value(|slot| slot.is_some()) {
                     mesh.update_value(|slot| {
                         if let Some(mesh) = slot {
@@ -591,14 +583,9 @@ fn sse_handler(
                     early.update_value(|list| list.push(ev.clone()));
                 }
             }
-            SseEvent::ChatMessage { .. } | SseEvent::RoomFull | SseEvent::Error { .. } => {}
         }
 
-        // UI state: presence and chat. The media events are the mesh's business,
-        // taken care of above.
         match ev {
-            // The authoritative snapshot: sent on every (re)connect, so it replaces
-            // whatever the UI had.
             SseEvent::Resync {
                 peers: list,
                 chat: history,
@@ -608,7 +595,15 @@ fn sse_handler(
                 chat.messages.set(
                     history
                         .into_iter()
-                        .map(|m| to_ui(m, mine.as_deref()))
+                        .map(|m| {
+                            to_ui(
+                                m.sender_id,
+                                m.sender_name,
+                                m.text,
+                                m.timestamp_ms,
+                                mine.as_deref(),
+                            )
+                        })
                         .collect(),
                 );
             }
@@ -628,38 +623,38 @@ fn sse_handler(
             } => {
                 let mine = self_id.get_untracked();
                 let own = mine.as_deref() == Some(from.as_str());
-                // Your own echo is not news, and anything that lands while the
-                // overlay is shut is exactly what the badge is for.
                 if !own && !chat.open.get_untracked() {
                     chat.unread.update(|count| *count += 1);
                 }
                 chat.messages.update(|list| {
-                    list.push(UiChatMsg {
-                        sender_name: sender_name.unwrap_or_else(|| "Anonymous".to_string()),
-                        time: format_time(timestamp_ms),
+                    list.push(to_ui(
                         from,
+                        sender_name,
                         text,
                         timestamp_ms,
-                        own,
-                    })
+                        mine.as_deref(),
+                    ));
                 });
             }
-            SseEvent::RoomFull => status.set(RoomStatus::Full),
-            SseEvent::Error { message } => status.set(RoomStatus::Error(message)),
             SseEvent::Offer { .. } | SseEvent::Answer { .. } | SseEvent::IceCandidate { .. } => {}
         }
     }
 }
 
-fn to_ui(msg: ChatMessage, mine: Option<&str>) -> UiChatMsg {
-    let own = mine == Some(msg.sender_id.as_str());
+fn to_ui(
+    from: String,
+    sender_name: Option<String>,
+    text: String,
+    timestamp_ms: u64,
+    mine: Option<&str>,
+) -> UiChatMsg {
     UiChatMsg {
-        time: format_time(msg.timestamp_ms),
-        from: msg.sender_id,
-        sender_name: msg.sender_name.unwrap_or_else(|| "Anonymous".to_string()),
-        text: msg.text,
-        timestamp_ms: msg.timestamp_ms,
-        own,
+        own: mine == Some(from.as_str()),
+        time: format_time(timestamp_ms),
+        from,
+        sender_name: sender_name.unwrap_or_else(|| "Anonymous".to_string()),
+        text,
+        timestamp_ms,
     }
 }
 

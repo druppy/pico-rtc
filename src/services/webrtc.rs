@@ -46,7 +46,7 @@ const LOCAL_TILE_ID: &str = "local";
 
 /// ICE servers for every peer connection: whatever the server hands out (the
 /// configured coturn), falling back to public STUN when that request fails.
-pub async fn ice_configuration() -> RtcConfiguration {
+async fn ice_configuration() -> RtcConfiguration {
     let servers = js_sys::Array::new();
 
     match fetch_turn_config().await {
@@ -106,8 +106,7 @@ pub async fn get_local_media() -> Result<MediaStream, String> {
         .map_err(|e| format!("{e:?}"))
 }
 
-/// Fetch TURN credentials from the server.
-pub async fn fetch_turn_config() -> Result<crate::types::TurnCredentials, String> {
+async fn fetch_turn_config() -> Result<crate::types::TurnCredentials, String> {
     let resp = gloo_net::http::Request::get("/api/turn-credentials")
         .send()
         .await
@@ -279,9 +278,7 @@ impl Mesh {
                 };
                 let (room, sid) = (room.clone(), sid.clone());
                 spawn_local(async move {
-                    if let Err(e) = send_signal(&room, &sid, &signal).await {
-                        console::warn_1(&format!("ice candidate not relayed: {e}").into());
-                    }
+                    relay(&room, &sid, &signal, "ice candidate").await;
                 });
             }) as Box<dyn FnMut(RtcPeerConnectionIceEvent)>)
         };
@@ -386,30 +383,29 @@ impl Mesh {
             if !set_description(pc.set_local_description(&desc), &what).await {
                 return;
             }
-            if let Err(e) = send_signal(
+            relay(
                 &room,
                 &sid,
                 &SignalMessage::Offer {
                     to: peer.clone(),
                     sdp,
                 },
+                &format!("offer for {peer}"),
             )
-            .await
-            {
-                console::warn_1(&format!("offer for {peer} not relayed: {e}").into());
-            }
+            .await;
         });
     }
 
     fn apply_offer(&mut self, from: &str, sdp: &str) {
         self.ensure_peer(from);
-        let Some(handle) = self.peers.get(from) else {
+        let we_initiate = self.we_initiate(from);
+        let Some(handle) = self.peers.get_mut(from) else {
             return;
         };
         // Belt and braces: signals are addressed now, so an offer should only reach
         // its answerer — but one sent before this peer's id was known to the sender
         // (or a replayed one) must not land on a connection already negotiating.
-        if self.we_initiate(from) && handle.negotiated {
+        if we_initiate && handle.negotiated {
             console::warn_1(&format!("ignoring offer from {from}: ours to initiate").into());
             return;
         }
@@ -418,13 +414,9 @@ impl Mesh {
             console::warn_1(&format!("ignoring offer from {from}: not stable").into());
             return;
         }
+        handle.remote_set = true;
         let pc = handle.pc.clone();
         let queue = Rc::clone(&handle.pending_ice);
-
-        let Some(handle) = self.peers.get_mut(from) else {
-            return;
-        };
-        handle.remote_set = true;
 
         let room = self.room.clone();
         let sid = self.self_id.clone();
@@ -452,18 +444,16 @@ impl Mesh {
             if !set_description(pc.set_local_description(&local), &what).await {
                 return;
             }
-            if let Err(e) = send_signal(
+            relay(
                 &room,
                 &sid,
                 &SignalMessage::Answer {
                     to: peer.clone(),
                     sdp,
                 },
+                &format!("answer for {peer}"),
             )
-            .await
-            {
-                console::warn_1(&format!("answer for {peer} not relayed: {e}").into());
-            }
+            .await;
             drain_ice(pc, queue, peer).await;
         });
     }
@@ -597,6 +587,12 @@ fn attach_to(stream: Option<&MediaStream>, id: &str) -> bool {
 
 /// Awaits a `setLocalDescription`/`setRemoteDescription` promise, logging which
 /// peer and which direction failed.
+async fn relay(room: &str, sid: &str, signal: &SignalMessage, what: &str) {
+    if let Err(e) = send_signal(room, sid, signal).await {
+        console::warn_1(&format!("{what} not relayed: {e}").into());
+    }
+}
+
 async fn set_description(promise: js_sys::Promise, what: &str) -> bool {
     match JsFuture::from(promise).await {
         Ok(_) => true,

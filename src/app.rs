@@ -1,6 +1,6 @@
+use crate::pages::{Home, NotFound, RoomPage};
 use leptos::prelude::*;
 use leptos_router::{components::*, path};
-use crate::pages::{Home, RoomPage, NotFound};
 
 #[component]
 pub fn App() -> impl IntoView {

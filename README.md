@@ -106,7 +106,7 @@ sequenceDiagram
     participant T as coturn
 
     B->>A: POST /api/room/:id/join — password, session_id, display_name
-    A-->>B: ok + self_id + peers + chat history
+    A-->>B: ok + self_id + peers
     B->>A: GET /api/room/:id/events?session_id=... (SSE, long-lived)
     A-->>B: resync — full peer list + last 50 chat messages
     B->>A: GET /api/turn-credentials

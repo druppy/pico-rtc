@@ -35,22 +35,16 @@ web-sys = { version = "0.3", features = [
     "RtcSessionDescriptionInit",
     "RtcSdpType",
     "RtcPeerConnectionIceEvent",
-    "RtcDataChannel",
-    "RtcDataChannelInit",
     "RtcTrackEvent",
     "RtcSignalingState",
     "RtcPeerConnectionState",
     "RtcRtpTransceiver",
     "RtcIceConnectionState",
-    "RtcIceGatheringState",
-    "RtcAnswerOptions",
-    "RtcOfferOptions",
     "RtcRtpSender",
     "MediaStream",
     "MediaStreamTrack",
     "MediaStreamConstraints",
     "MediaDevices",
-    "MediaTrackConstraints",
     "Navigator",
     "Window",
     "Document",
@@ -59,7 +53,6 @@ web-sys = { version = "0.3", features = [
     # `srcObject` lives here, not on HtmlVideoElement, and this web-sys version
     # has no Deref chain between the two.
     "HtmlMediaElement",
-    "HtmlAudioElement",
     # Loudness detection: who owns the large tile.
     "AudioContext",
     "AudioContextState",
@@ -83,19 +76,16 @@ gloo-net = { version = "0.6", features = ["http"] }
 axum = { version = "0.8", features = ["macros"] }
 tokio = { version = "1", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
-tower-http = { version = "0.6", features = ["fs", "cors"] }
+tower-http = { version = "0.6", features = ["fs"] }
 futures = "0.3"
 dashmap = "6"
 hmac = "0.12"
 sha1 = "0.10"
-sha2 = "0.10"
-hex = "0.4"
 base64 = "0.22"
 rand = "0.9"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 constant_time_eq = "0.3"
-http = "1"
 
 [features]
 default = []

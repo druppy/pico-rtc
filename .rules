@@ -22,7 +22,7 @@
 - Regular `POST /signal` for client → server (SDP offers/answers, ICE candidates)
 - **Media signals are addressed**: every offer/answer/ICE carries `to` (a `session_id`); the server relays to that one participant only and rewrites `to` → `from`. Unaddressed broadcast corrupts the receiver's single `RTCPeerConnection` for the sender
 - `peer-joined` is broadcast from the SSE handler *after* the joiner subscribes, never from `handle_join`: a `broadcast` with no subscriber is dropped, and a lost offer strands that pair forever (the tie-break allows only one side to offer)
-- SSE event types: `peer-joined`, `peer-left`, `offer`, `answer`, `ice-candidate`, `chat-message`
+- SSE event types: `resync`, `peer-joined`, `peer-left`, `offer`, `answer`, `ice-candidate`, `chat-message`
 - One SSE stream per room visit, owned by `RoomPage` and closed in `on_cleanup`: dropping an `EventSource` does not close its connection, so an unowned stream leaks a socket per visit against the browser's 6-connections-per-host cap
 - All signaling payloads are JSON (serde)
 
@@ -99,7 +99,7 @@
 
 ## Security
 - TURN credentials: ephemeral (HMAC-SHA1 with TTL per TURN REST API spec — this is a protocol constraint, not a weakness; HMAC security is independent of hash collision resistance)
-- Internal hashing (user IDs, future tokens): SHA-256 (sha2 crate)
+- Internal hashing (user IDs, future tokens): SHA-256 when that is added; nothing hashes user IDs today
 - Password comparison: `constant_time_eq` crate (not `==`)
 - SSE connection: authenticated on connect, re-validated on each signal POST
 - No secrets in client bundle (TURN secret stays server-side)

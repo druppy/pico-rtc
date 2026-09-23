@@ -1,5 +1,7 @@
 use leptos::prelude::*;
 use leptos_router::hooks::use_navigate;
+use wasm_bindgen::JsCast;
+use web_sys::HtmlDocument;
 
 #[component]
 pub fn Home() -> impl IntoView {
@@ -63,13 +65,13 @@ pub fn Home() -> impl IntoView {
     }
 }
 
-/// Read a cookie value by name (via js_sys, always available in browser).
+fn html_document() -> Option<HtmlDocument> {
+    web_sys::window()?.document()?.dyn_into().ok()
+}
+
+/// Read a cookie value by name.
 pub fn get_cookie(name: &str) -> Option<String> {
-    let doc = web_sys::window()?.document();
-    let doc = doc?;
-    let cookie_str = js_sys::Reflect::get(&doc, &wasm_bindgen::JsValue::from_str("cookie"))
-        .ok()?
-        .as_string()?;
+    let cookie_str = html_document()?.cookie().ok()?;
     cookie_str.split(';').find_map(|c| {
         let c = c.trim();
         c.strip_prefix(&format!("{name}=")).map(|v| v.to_string())
@@ -78,12 +80,9 @@ pub fn get_cookie(name: &str) -> Option<String> {
 
 /// Set a cookie (1 year expiry, same-site lax).
 pub fn set_cookie(name: &str, value: &str) {
-    if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
-        let val = format!("{name}={value}; Max-Age=31536000; Path=/; SameSite=Lax");
-        let _ = js_sys::Reflect::set(
-            &doc,
-            &wasm_bindgen::JsValue::from_str("cookie"),
-            &wasm_bindgen::JsValue::from_str(&val),
-        );
+    if let Some(doc) = html_document() {
+        let _ = doc.set_cookie(&format!(
+            "{name}={value}; Max-Age=31536000; Path=/; SameSite=Lax"
+        ));
     }
 }

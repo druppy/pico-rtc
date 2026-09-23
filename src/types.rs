@@ -10,15 +10,9 @@ use serde::{Deserialize, Serialize};
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum SignalMessage {
     #[serde(rename = "offer")]
-    Offer {
-        to: String,
-        sdp: String,
-    },
+    Offer { to: String, sdp: String },
     #[serde(rename = "answer")]
-    Answer {
-        to: String,
-        sdp: String,
-    },
+    Answer { to: String, sdp: String },
     #[serde(rename = "ice-candidate")]
     IceCandidate {
         to: String,
@@ -26,7 +20,6 @@ pub enum SignalMessage {
         sdp_mid: Option<String>,
         sdp_mline_index: Option<u16>,
     },
-    Renegotiate,
 }
 
 /// A chat message (shared between server storage and client display)
@@ -89,10 +82,6 @@ pub enum SseEvent {
         text: String,
         timestamp_ms: u64,
     },
-    #[serde(rename = "room-full")]
-    RoomFull,
-    #[serde(rename = "error")]
-    Error { message: String },
 }
 
 /// Response from GET /api/turn-credentials
@@ -113,12 +102,7 @@ pub enum JoinResponse {
     #[serde(rename = "password-required")]
     PasswordRequired {},
     #[serde(rename = "ok")]
-    Ok {
-        self_id: String,
-        peers: Vec<String>,
-        /// Recent chat history (last 50 messages)
-        chat: Vec<ChatMessage>,
-    },
+    Ok { self_id: String, peers: Vec<String> },
     #[serde(rename = "full")]
     Full {},
 }

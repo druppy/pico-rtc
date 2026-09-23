@@ -26,8 +26,7 @@ pub fn generate_credentials(secret: &str, host: &str, port: u16, ttl_secs: u64) 
     let random_id = format!("{:016x}", rand::random::<u64>());
     let username = format!("{expires}:{random_id}");
 
-    let mut mac =
-        HmacSha1::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key length");
+    let mut mac = HmacSha1::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key length");
     mac.update(username.as_bytes());
     let credential = base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes());
 
@@ -41,12 +40,4 @@ pub fn generate_credentials(secret: &str, host: &str, port: u16, ttl_secs: u64) 
         credential,
         ttl_secs,
     }
-}
-
-/// Hash a user-supplied identifier with SHA-256 (for cookies, internal keys, etc.)
-pub fn hash_id(input: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(input.as_bytes());
-    hex::encode(hasher.finalize())
 }
